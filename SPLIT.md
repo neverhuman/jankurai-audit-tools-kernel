@@ -12,14 +12,15 @@ extracted from jankurai-core so the core CLI and sibling tools depend on one ker
 
 ## Repositories
 
-- Local authoritative repo: `root/jankurai-tools-kernel`
-- Public mirror: `neverhuman/jankurai-tools-kernel`
+- Historical Jeryu repo: `root/jankurai-tools-kernel`
+- Primary GitHub repository: `neverhuman/jankurai-tools-kernel`
 - Release tag pattern: `jankurai-tools-kernel-v1.7.0-split.0`
 - Source extraction commit: `446af94`
 
 ## Split Rules
 
 - GitHub is authoritative; Jeryu refs are retained as historical inputs.
+- The hub `neverhuman/jankurai` controls product composition and releases.
 - Release builds depend on immutable GitHub tags, not branches.
 - Local development uses the hub `scripts/fuse.sh` output under `.fusion/`.
 - Committed manifests must not depend on sibling checkout paths.
