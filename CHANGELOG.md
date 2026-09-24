@@ -10,6 +10,8 @@ version string lives in [`VERSION`](VERSION).
 
 ### Changed
 
+- Public auditor identity is `1.7.1`. Standard `0.9.0` and schema `1.9.0` are unchanged.
+  A stored scan whose `last_full_auditor_version` differs from this identity runs a full scan.
 - Treat `reviewed_manual` generated-zone entries as review-governed source
   artifacts while retaining existence, metadata, and generator-only guards.
 
