@@ -2504,6 +2504,13 @@ pub fn ci_hardening_hits(ctx: &AuditContext) -> Vec<FindingHit> {
 
 /// Phase 07 H1: Detect contract source files under `contracts/` that have no matching
 /// `[[zone]]` entry in `agent/generated-zones.toml`, indicating handwritten drift risk.
+///
+/// Two shapes count as covered:
+/// - contract-first: a zone's `source` names the contract file (code is generated from it);
+/// - code-first: a zone's `path` is the contract file (or a directory holding it) with
+///   `write_policy = "generated_output"`, i.e. the contract is regenerated from typed
+///   sources. Code-first only counts when the zone's `command` is actually exercised by a
+///   test or gate lane, because "generated" without a drift check is handwritten in practice.
 pub fn contract_source_hits(ctx: &AuditContext) -> Vec<FindingHit> {
     const CONTRACT_EXTENSIONS: &[&str] = &[".yaml", ".yml", ".json", ".proto", ".tsp"];
     let contract_sources: Vec<&FileInfo> = ctx
@@ -2521,20 +2528,15 @@ pub fn contract_source_hits(ctx: &AuditContext) -> Vec<FindingHit> {
         return vec![];
     }
 
-    // Load generated-zones.toml to check for matching zone sources
+    // Load generated-zones.toml to check for matching zone entries
     let zones_path = ctx.root.join(GENERATED_ZONES_MANIFEST);
-    let zone_sources: Vec<String> = if zones_path.exists() {
+    let zones: Vec<crate::commands::context_data::GeneratedZone> = if zones_path.exists() {
         std::fs::read_to_string(&zones_path)
             .ok()
             .and_then(|text| {
                 toml::from_str::<crate::commands::context_data::GeneratedZonesFile>(&text).ok()
             })
-            .map(|file| {
-                file.zone
-                    .iter()
-                    .map(|z| z.source.trim().to_string())
-                    .collect()
-            })
+            .map(|file| file.zone)
             .unwrap_or_default()
     } else {
         vec![]
@@ -2542,10 +2544,9 @@ pub fn contract_source_hits(ctx: &AuditContext) -> Vec<FindingHit> {
 
     let mut hits = vec![];
     for source in &contract_sources {
-        let has_zone = zone_sources.iter().any(|zs| {
-            zs == &source.rel_path
-                || zs.contains(&source.rel_path)
-                || source.rel_path.contains(zs.as_str())
+        let has_zone = zones.iter().any(|zone| {
+            zone_source_names(zone, &source.rel_path)
+                || zone_regenerates_contract(ctx, zone, &source.rel_path)
         });
         if !has_zone {
             hits.push(FindingHit {
@@ -2556,7 +2557,7 @@ pub fn contract_source_hits(ctx: &AuditContext) -> Vec<FindingHit> {
                     source.rel_path
                 ),
                 matched_term: Some("orphaned-contract-source".into()),
-                agent_fix: "add a `[[zone]]` in `agent/generated-zones.toml` with `source`, `command`, and `path` for this contract, or generate typed clients from it".into(),
+                agent_fix: "add a `[[zone]]` in `agent/generated-zones.toml`: contract-first, set `source` to this contract plus the `command` and `path` it generates; code-first, set `path` to this contract with `source` = the typed crate, `command` = the regenerate command, `read_only = true` and `write_policy = \"generated_output\"`, and prove the command in a drift test or gate lane".into(),
                 problem: format!(
                     "contract source `{}` has no generated zone entry",
                     source.rel_path
@@ -2565,6 +2566,47 @@ pub fn contract_source_hits(ctx: &AuditContext) -> Vec<FindingHit> {
         }
     }
     hits
+}
+
+/// Contract-first coverage: the zone declares this contract as the generator input.
+fn zone_source_names(zone: &crate::commands::context_data::GeneratedZone, rel_path: &str) -> bool {
+    let zone_source = zone.source.trim();
+    if zone_source.is_empty() {
+        return false;
+    }
+    zone_source == rel_path || zone_source.contains(rel_path) || rel_path.contains(zone_source)
+}
+
+/// Code-first coverage: the zone declares this contract as generated output and a test or
+/// gate lane runs the regenerate command, so staleness is caught rather than assumed.
+fn zone_regenerates_contract(
+    ctx: &AuditContext,
+    zone: &crate::commands::context_data::GeneratedZone,
+    rel_path: &str,
+) -> bool {
+    if zone.write_policy.trim() != "generated_output" {
+        return false;
+    }
+    let zone_path = zone.path.trim().trim_end_matches('/');
+    if zone_path.is_empty() {
+        return false;
+    }
+    let covers = zone_path == rel_path || rel_path.starts_with(&format!("{zone_path}/"));
+    covers && drift_check_runs_command(ctx, zone.command.trim())
+}
+
+/// True when `command` appears in a test file, a proof-lane manifest or a CI workflow —
+/// the places a regenerate-and-compare drift check can actually fail a build from.
+fn drift_check_runs_command(ctx: &AuditContext, command: &str) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+    ctx.all_files.iter().any(|f| {
+        (is_test_or_example_path(&f.rel_path)
+            || f.rel_path == "agent/proof-lanes.toml"
+            || crate::audit::ci_provider::is_github_workflow_yaml_path(&f.rel_path))
+            && f.text.contains(command)
+    })
 }
 
 /// Phase 07 H2: Verify that files declared in `agent/generated-zones.toml` actually exist.

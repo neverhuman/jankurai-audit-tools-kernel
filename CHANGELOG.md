@@ -10,6 +10,14 @@ version string lives in [`VERSION`](VERSION).
 
 ### Changed
 
+- `HLT-007-HANDWRITTEN-CONTRACT` accepts code-first contracts. A contract file
+  under `contracts/` now counts as covered when a `[[zone]]` names it as
+  generated output (`path` equal to the file or a directory holding it, with
+  `write_policy = "generated_output"`) and a test or gate lane runs the zone's
+  `command`, as well as in the previous contract-first shape where a zone's
+  `source` names the contract. Repositories whose typed sources generate the
+  schema no longer have to mislabel the generated file as the source; a
+  `generated_output` zone with no drift check is still flagged.
 - CI evidence is detected through a CI-provider abstraction
   (`audit::ci_provider`) instead of matching the path `.github/workflows/`.
   GitHub Actions behaves as before; a repository gated by the jeryu forge now
