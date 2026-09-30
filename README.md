@@ -51,6 +51,7 @@ setup; see [testing](docs/testing.md) and
 - [Architecture](docs/architecture.md)
 - [Testing](docs/testing.md)
 - [Boundaries](docs/boundaries.md)
+- [CI providers and CI evidence](docs/ci-providers.md)
 - [Release process](docs/release.md)
 - [Agent exceptions and overrides](docs/exceptions.md)
 

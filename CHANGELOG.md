@@ -10,6 +10,14 @@ version string lives in [`VERSION`](VERSION).
 
 ### Changed
 
+- CI evidence is detected through a CI-provider abstraction
+  (`audit::ci_provider`) instead of matching the path `.github/workflows/`.
+  GitHub Actions behaves as before; a repository gated by the jeryu forge now
+  earns the audit-lane, security-in-CI, tool-adoption and release-automation CI
+  evidence from a checked-in `agent/ci.toml` (or `.jeryu/ci.toml`) declaration,
+  cross-checked against the real content of the lane it names. Repair routes
+  point forge-gated repositories at their declaration instead of at
+  `.github/workflows/jankurai.yml`. See `docs/ci-providers.md`.
 - Public auditor identity is `1.7.1`. Standard `0.9.0` and schema `1.9.0` are unchanged.
   A stored scan whose `last_full_auditor_version` differs from this identity runs a full scan.
 - Treat `reviewed_manual` generated-zone entries as review-governed source

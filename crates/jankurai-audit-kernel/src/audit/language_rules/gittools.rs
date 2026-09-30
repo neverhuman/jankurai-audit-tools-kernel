@@ -150,8 +150,7 @@ fn is_gittools_file(file: &FileInfo) -> bool {
         || ((lower.ends_with("makefile")
             || lower.ends_with("justfile")
             || lower.starts_with("scripts/")
-            || lower.starts_with(".github/workflows/")
-            || lower == ".gitlab-ci.yml")
+            || crate::audit::ci_provider::is_ci_config_path(&lower))
             && configures_hook_tooling(&file.text))
 }
 
@@ -468,15 +467,18 @@ fn advisory_signals(ctx: &AuditContext) -> usize {
         let lower = file.rel_path.to_ascii_lowercase();
         is_gittools_owned_surface(&lower) || lower == "package.json"
     });
-    let has_ci_mirror = ctx.all_files.iter().any(|file| {
-        let lower = file.rel_path.to_ascii_lowercase();
-        lower.starts_with(".github/workflows/")
-            && (file.text.contains("pre-commit")
-                || file.text.contains("lint-staged")
-                || file.text.contains("commitlint")
-                || file.text.contains("lefthook")
-                || file.text.contains("just check"))
-    });
+    // Whatever provider gates the repository, the mirror has to be in what CI
+    // really runs, not only in a committed workflow file.
+    let ci_text = crate::audit::ci_provider::ci_evidence_text(&ctx.all_files);
+    let has_ci_mirror = [
+        "pre-commit",
+        "lint-staged",
+        "commitlint",
+        "lefthook",
+        "just check",
+    ]
+    .iter()
+    .any(|needle| ci_text.contains(needle));
     if has_hook_manager && !has_ci_mirror {
         total += 1;
     }

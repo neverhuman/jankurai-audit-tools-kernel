@@ -55,7 +55,7 @@ pub fn is_dev_only_path(path: &str) -> bool {
 
 pub fn is_executable_policy_surface(file: &FileInfo) -> bool {
     let lower = file.rel_path.to_ascii_lowercase();
-    lower.starts_with(".github/workflows/")
+    crate::audit::ci_provider::is_ci_evidence_path(&lower)
         || lower.starts_with(".github/actions/")
         || lower.starts_with(".github/hooks/")
         || lower.starts_with(".git/hooks/")

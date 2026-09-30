@@ -4,6 +4,7 @@ use super::common::{
     nearby_proof, sort_and_cap_findings, strip_comments_for_line_language,
 };
 use super::LanguageFinding;
+use crate::audit::ci_provider;
 use crate::audit::helpers::AuditContext;
 use crate::model::FileInfo;
 use std::collections::BTreeSet;
@@ -166,15 +167,7 @@ fn is_ci_file(file: &FileInfo) -> bool {
     {
         return false;
     }
-    let lower = file.rel_path.to_ascii_lowercase();
-    lower.starts_with(".github/workflows/") && (lower.ends_with(".yml") || lower.ends_with(".yaml"))
-        || lower == ".gitlab-ci.yml"
-        || lower == "bitbucket-pipelines.yml"
-        || lower == "jenkinsfile"
-        || lower == "azure-pipelines.yml"
-        || lower.starts_with(".circleci/") && lower.ends_with("config.yml")
-        || lower.starts_with(".buildkite/") && (lower.ends_with(".yml") || lower.ends_with(".yaml"))
-        || lower.contains("buildkite") && (lower.ends_with(".yml") || lower.ends_with(".yaml"))
+    ci_provider::is_ci_config_path(&file.rel_path)
 }
 
 fn findings_for_file(file: &FileInfo) -> Vec<LanguageFinding> {
@@ -182,10 +175,9 @@ fn findings_for_file(file: &FileInfo) -> Vec<LanguageFinding> {
     let mut seen = BTreeSet::new();
     let file_kind = line_kind(file);
     let text_lower = file.text.to_ascii_lowercase();
-    let is_github_workflow = file
-        .rel_path
-        .to_ascii_lowercase()
-        .starts_with(".github/workflows/");
+    // The rules below read GitHub Actions workflow keys, so they stay bound to
+    // that provider even though `is_ci_file` admits the others.
+    let is_github_workflow = ci_provider::is_github_workflow_path(&file.rel_path);
 
     if is_github_workflow
         && text_lower.contains("pull_request_target")

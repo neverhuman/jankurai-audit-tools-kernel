@@ -1,3 +1,4 @@
+pub mod ci_provider;
 pub mod copy_code;
 pub mod evidence;
 pub mod file_kinds;

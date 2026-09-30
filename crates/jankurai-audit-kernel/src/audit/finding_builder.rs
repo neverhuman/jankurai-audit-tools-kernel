@@ -212,7 +212,7 @@ pub fn confidence_for_severity(severity: &str) -> f64 {
 }
 
 pub fn evidence_kind_for_path(path: &str) -> &'static str {
-    if path.starts_with(".github/workflows") {
+    if crate::audit::ci_provider::is_ci_evidence_path(path) {
         "workflow-command"
     } else if path.starts_with("agent/") {
         "policy-manifest"
@@ -454,6 +454,28 @@ mod tests {
     }
 }
 
+/// Default CI anchor of the provider-neutral route table; replaced per provider
+/// by [`dimension_soft_route_for`].
+const CI_LANE_ROUTE_PATH: &str =
+    crate::audit::ci_provider::CiProvider::GithubActions.ci_anchor_path();
+
+/// Repair route for a below-floor dimension, with CI anchors pointed at the
+/// provider that actually gates this repository. Prefer this over
+/// [`dimension_soft_route`]: a forge-gated repository must not be told to add a
+/// workflow file its forge would never execute.
+pub fn dimension_soft_route_for(
+    ctx: &crate::audit::helpers::AuditContext,
+    name: &str,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    let (category, path, rule_id, fix) = dimension_soft_route(name);
+    let path = if path == CI_LANE_ROUTE_PATH {
+        crate::audit::ci_provider::audit_lane_anchor_path(&ctx.all_files)
+    } else {
+        path
+    };
+    (category, path, rule_id, fix)
+}
+
 pub fn dimension_soft_route(
     name: &str,
 ) -> (&'static str, &'static str, &'static str, &'static str) {
@@ -478,7 +500,7 @@ pub fn dimension_soft_route(
         ),
         "Security and supply-chain posture" => (
             "security",
-            ".github/workflows/jankurai.yml",
+            CI_LANE_ROUTE_PATH,
             "HLT-016-SUPPLY-CHAIN-DRIFT",
             "wire secret, dependency, provenance, and workflow scans into an operational CI lane",
         ),

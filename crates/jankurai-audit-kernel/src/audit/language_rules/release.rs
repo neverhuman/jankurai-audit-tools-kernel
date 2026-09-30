@@ -187,7 +187,7 @@ fn is_release_file(file: &FileInfo) -> bool {
         || lower_path.contains("publish")
         || lower_path.contains("deploy")
         || lower_path.ends_with("package.json")
-        || lower_path.starts_with(".github/workflows/");
+        || crate::audit::ci_provider::is_ci_evidence_path(&lower_path);
     let text_says_release = has_release_command(&lower_text)
         || lower_text.contains("gh release")
         || lower_text.contains("npm publish")

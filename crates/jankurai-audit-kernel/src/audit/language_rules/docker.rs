@@ -269,8 +269,7 @@ fn is_docker_surface(file: &FileInfo) -> bool {
         || lower.ends_with("docker-compose.yaml")
         || lower.ends_with("compose.yml")
         || lower.ends_with("compose.yaml")
-        || lower.starts_with(".github/workflows/")
-            && (lower.ends_with(".yml") || lower.ends_with(".yaml"))
+        || crate::audit::ci_provider::is_github_workflow_yaml_path(&lower)
 }
 
 fn hard_hits_for_file(file: &FileInfo) -> Vec<LanguageFinding> {

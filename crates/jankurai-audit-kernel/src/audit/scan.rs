@@ -1124,7 +1124,7 @@ fn has_release_surface(ctx: &AuditContext) -> bool {
         matches!(
             lower_path.as_str(),
             "cargo.toml" | "package.json" | "pyproject.toml" | "go.mod"
-        ) || lower_path.starts_with(".github/workflows/")
+        ) || crate::audit::ci_provider::is_ci_evidence_path(&lower_path)
             || lower_path.contains("release")
             || lower_path.contains("publish")
             || (prose::allows_word_scan(file) && {
@@ -1200,10 +1200,19 @@ fn has_release_process_doc(ctx: &AuditContext) -> bool {
 }
 
 fn has_release_automation_or_policy(ctx: &AuditContext) -> bool {
+    // A forge-gated repository declares its release lane instead of committing
+    // a workflow file, so read what CI runs, not only where it is written.
+    let ci_text = crate::audit::ci_provider::ci_evidence_text(&ctx.all_files);
+    if ["release", "publish"]
+        .iter()
+        .any(|needle| ci_text.contains(needle))
+    {
+        return true;
+    }
     ctx.all_files.iter().any(|file| {
         let path = file.rel_path.to_ascii_lowercase();
         let lower = file.text.to_ascii_lowercase();
-        path.starts_with(".github/workflows/")
+        crate::audit::ci_provider::is_ci_evidence_path(&path)
             && (prose::allows_word_scan(file) && {
                 lower.contains("release")
                     || lower.contains("publish")
@@ -2451,9 +2460,7 @@ pub fn manifest_parse_findings(ctx: &AuditContext) -> Vec<FindingHit> {
 pub fn ci_hardening_hits(ctx: &AuditContext) -> Vec<FindingHit> {
     let mut hits = vec![];
     for file in ctx.all_files.iter().filter(|f| {
-        !f.is_generated
-            && f.rel_path.starts_with(".github/workflows/")
-            && (f.rel_path.ends_with(".yml") || f.rel_path.ends_with(".yaml"))
+        !f.is_generated && crate::audit::ci_provider::is_github_workflow_yaml_path(&f.rel_path)
     }) {
         for (idx, line) in file.text.lines().enumerate() {
             let line_lower = line.to_ascii_lowercase();

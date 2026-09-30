@@ -419,31 +419,33 @@ pub fn tool_adoption_control_plane_present(ctx: &AuditContext) -> bool {
             .any(|f| f.rel_path == "agent/test-map.json" || f.rel_path == "agent/proof-lanes.toml")
 }
 
+/// Text of the GitHub Actions workflow files. Prefer [`ci_evidence_text`]
+/// unless the caller is specifically about that provider's YAML.
 pub fn github_workflow_text(ctx: &AuditContext) -> String {
-    let mut text = String::new();
-    for file in ctx
-        .all_files
-        .iter()
-        .filter(|f| f.rel_path.starts_with(".github/workflows/"))
-    {
-        text.push('\n');
-        text.push_str(&file.text.to_ascii_lowercase());
-    }
-    text
+    super::ci_provider::github_workflow_text(&ctx.all_files)
 }
 
+/// Text of every CI-evidence surface this repository has, whichever provider
+/// gates it: GitHub Actions workflow files, and the resolved content of the
+/// lanes a checked-in jeryu declaration names.
+pub fn ci_evidence_text(ctx: &AuditContext) -> String {
+    super::ci_provider::ci_evidence_text(&ctx.all_files)
+}
+
+/// Artifact upload is declared in GitHub Actions workflow YAML, so this stays
+/// provider-specific.
 pub fn tool_adoption_upload_text(ctx: &AuditContext) -> String {
     github_workflow_text(ctx)
 }
 
-/// Workflow text PLUS the `ops/ci/*.sh` lane scripts that workflows call.
+/// CI-evidence text PLUS the `ops/ci/*.sh` lane scripts that CI calls.
 ///
 /// A *thin* workflow (required by the CI-local-parity rule, HLT-042) delegates
 /// its real commands to `bash ops/ci/<lane>.sh`. The tool's adopted command
 /// then lives in the script, not the YAML — so crediting tool adoption must scan
 /// the called lane scripts too, otherwise the two rules contradict each other.
 pub fn tool_adoption_ci_text(ctx: &AuditContext) -> String {
-    let mut text = github_workflow_text(ctx);
+    let mut text = ci_evidence_text(ctx);
     for file in ctx
         .all_files
         .iter()
