@@ -787,15 +787,26 @@ pub fn real_command_surface_contains(ctx: &AuditContext, needles: &[&str]) -> bo
 
 pub fn security_lane_text(ctx: &AuditContext) -> String {
     let mut text = command_surface_text(ctx);
-    if let Some(script) = ctx
-        .all_files
-        .iter()
-        .find(|f| f.rel_path == "tools/security-lane.sh")
-    {
+    for script in ctx.all_files.iter().filter(|f| is_security_lane_script(f)) {
         text.push('\n');
         text.push_str(&script.text.to_ascii_lowercase());
     }
     text
+}
+
+/// A scripted security lane: the canonical `tools/security-lane.sh`, or an equivalent script
+/// under `ops/ci/`, `scripts/` or `tools/` whose name says it is the security lane.
+pub fn has_security_lane_script(ctx: &AuditContext) -> bool {
+    ctx.all_files.iter().any(is_security_lane_script)
+}
+
+fn is_security_lane_script(f: &crate::model::FileInfo) -> bool {
+    f.rel_path == "tools/security-lane.sh"
+        || (["ops/ci/", "scripts/", "tools/"]
+            .iter()
+            .any(|p| f.rel_path.starts_with(p))
+            && f.name.starts_with("security")
+            && f.suffix == ".sh")
 }
 
 pub fn observability_docs_text(ctx: &AuditContext) -> String {

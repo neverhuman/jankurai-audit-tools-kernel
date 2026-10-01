@@ -189,7 +189,7 @@ struct ExecLine {
 }
 
 pub fn findings(ctx: &AuditContext, file: &FileInfo) -> Vec<LanguageFinding> {
-    if !is_migration_file_path(&file.rel_path) {
+    if !is_migration_file_path(&file.rel_path) || is_applied(ctx, file) {
         return Vec::new();
     }
 
@@ -338,8 +338,8 @@ pub fn findings(ctx: &AuditContext, file: &FileInfo) -> Vec<LanguageFinding> {
     out
 }
 
-pub fn advisory_findings(_ctx: &AuditContext, file: &FileInfo) -> Vec<LanguageFinding> {
-    if !is_migration_file_path(&file.rel_path) {
+pub fn advisory_findings(ctx: &AuditContext, file: &FileInfo) -> Vec<LanguageFinding> {
+    if !is_migration_file_path(&file.rel_path) || is_applied(ctx, file) {
         return Vec::new();
     }
     let statements = statements(&executable_lines(&file.text));
@@ -381,6 +381,15 @@ pub fn advisory_findings(_ctx: &AuditContext, file: &FileInfo) -> Vec<LanguageFi
         }
     }
     out
+}
+
+/// An already-applied migration (`[sql_migrations] applied_through`) cannot be edited, so the
+/// migration-safety rules leave it alone; they judge the migrations added after it.
+fn is_applied(ctx: &AuditContext, file: &FileInfo) -> bool {
+    crate::audit::fs_policy::migration_is_applied(
+        &file.rel_path,
+        &crate::audit::fs_policy::applied_migrations_through(&ctx.root),
+    )
 }
 
 pub fn is_migration_file_path(rel_path: &str) -> bool {

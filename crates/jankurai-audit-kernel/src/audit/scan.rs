@@ -510,6 +510,9 @@ pub fn pattern_hits(files: &[FileInfo], patterns: &[&str]) -> Vec<FindingHit> {
 pub fn todo_hits(ctx: &AuditContext) -> Vec<FindingHit> {
     let mut hits = vec![];
     for file in product_code_files(ctx) {
+        if is_minified_or_vendored(&file) {
+            continue;
+        }
         for line in source_context::source_lines(&file) {
             if line.comment_only || line.test_scaffold {
                 continue;
@@ -547,6 +550,9 @@ pub fn todo_hits(ctx: &AuditContext) -> Vec<FindingHit> {
 pub fn fallback_hits(ctx: &AuditContext) -> Vec<FindingHit> {
     let mut hits = vec![];
     for file in product_code_files(ctx) {
+        if is_minified_or_vendored(&file) {
+            continue;
+        }
         for line in source_context::source_lines(&file) {
             if line.comment_only || line.test_scaffold {
                 continue;
@@ -1841,6 +1847,35 @@ fn line_has_db_driver(line: &str) -> bool {
     .any(|m| line.contains(m))
 }
 
+/// SQL statements written the way code writes them: uppercase keywords. Matched over joined
+/// active code too, so a multi-line uppercase statement (a template literal, a raw string) is
+/// still caught.
+static DB_UPPERCASE_STATEMENT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(concat!(
+        r"\bSELECT\b[^;]{0,240}?\bFROM\b",
+        r"|\bINSERT\s+INTO\b",
+        r"|\bUPDATE\b[^;]{0,240}?\bSET\b",
+        r"|\bDELETE\s+FROM\b",
+        r"|\bDROP\s+(?:TABLE|DATABASE|INDEX)\b",
+    ))
+    .expect("HLT-006 uppercase statement regex is valid")
+});
+
+/// A query marker next to a lowercase statement shape: a bind parameter (`$1`, `?,` / `?)`) or a
+/// `where` / `join` clause. Without one, a lowercase shape is interface copy ("Select a file
+/// from the list", "update the settings set"), not a database access.
+static DB_QUERY_MARKER: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\$\d+|\?\s*[,)]|\bwhere\b|\bjoin\b")
+        .expect("HLT-006 query marker regex is valid")
+});
+
+fn line_has_db_access(active: &str) -> bool {
+    let lower = active.to_ascii_lowercase();
+    line_has_db_driver(&lower)
+        || DB_UPPERCASE_STATEMENT.is_match(active)
+        || (line_has_sql_statement(&lower) && DB_QUERY_MARKER.is_match(active))
+}
+
 pub fn wrong_layer_db_hits(ctx: &AuditContext) -> Vec<FindingHit> {
     let mut hits = vec![];
     for file in product_files(ctx) {
@@ -1859,19 +1894,43 @@ pub fn wrong_layer_db_hits(ctx: &AuditContext) -> Vec<FindingHit> {
         {
             continue;
         }
-        // Line-scoped, SQL-statement-shape / driver match — NOT a whole-file bare
-        // keyword substring (which matched UI copy like 'delete failed' and the
-        // DOM <select> element). One finding per file at the first real hit.
-        for (idx, raw_line) in file.text.lines().enumerate() {
-            let line = raw_line.to_ascii_lowercase();
-            if line_has_sql_statement(&line) || line_has_db_driver(&line) {
-                hits.push(FindingHit::new(
-                    &file.rel_path,
-                    idx + 1,
-                    "DB marker in non-adapter layer",
-                ));
-                break;
+        // Over active code only: a comment that names a query is not a query. Drivers and
+        // statement shapes are judged per line (lowercase shapes only next to a query marker,
+        // so UI copy like 'delete failed', 'Select a dataset from the sidebar' or a DOM
+        // <select> does not count); uppercase statements may also span lines, so they are
+        // matched over the joined active code. One finding per file, at the line where the
+        // access starts.
+        let lines = source_context::source_lines(&file)
+            .into_iter()
+            .filter(|line| !line.comment_only && !line.test_scaffold)
+            .collect::<Vec<_>>();
+        let per_line = lines
+            .iter()
+            .find(|line| line_has_db_access(line.active_code.trim()))
+            .map(|line| line.line_no);
+        let multi_line = || {
+            let mut joined = String::new();
+            let mut starts = Vec::with_capacity(lines.len());
+            for line in &lines {
+                starts.push((joined.len(), line.line_no));
+                joined.push_str(&line.active_code);
+                joined.push('\n');
             }
+            DB_UPPERCASE_STATEMENT.find(&joined).map(|m| {
+                starts
+                    .iter()
+                    .take_while(|(offset, _)| *offset <= m.start())
+                    .last()
+                    .map(|(_, line_no)| *line_no)
+                    .unwrap_or(1)
+            })
+        };
+        if let Some(line_no) = per_line.or_else(multi_line) {
+            hits.push(FindingHit::new(
+                &file.rel_path,
+                line_no,
+                "DB marker in non-adapter layer",
+            ));
         }
     }
     hits
@@ -2039,9 +2098,22 @@ pub fn future_hostile_hits(ctx: &AuditContext) -> Vec<FindingHit> {
             if active.is_empty() {
                 continue;
             }
-            if let Some((term, _regex)) = future_hostile_term_regexes()
-                .iter()
-                .find(|(_, regex)| regex.is_match(active))
+            // Strong markers count anywhere on the line. Weak words (and the intent that turns
+            // them into debt) count only in human-language text, the line's string literals:
+            // `remove_file(&temporary)` is code, not a stated intent to remove anything. This
+            // is the non-Rust counterpart of the Rust lexer path above.
+            let literal_text = string_literal_text(active);
+            let literal_lower = literal_text.to_ascii_lowercase();
+            if let Some((term, _regex)) =
+                future_hostile_term_regexes().iter().find(|(term, regex)| {
+                    let haystack = if ALWAYS_DEBT_TERMS.contains(&term.as_str()) {
+                        active
+                    } else {
+                        literal_text.as_str()
+                    };
+                    term_matches_outside_path_segment(regex, haystack)
+                        && future_hostile_term_has_debt_context(term, &literal_lower)
+                })
             {
                 if source_context::term_only_appears_in_local_binding(active, term) {
                     continue;
@@ -2277,47 +2349,112 @@ fn future_hostile_text_term(text: &str) -> Option<String> {
     future_hostile_term_regexes()
         .iter()
         .find(|(term, regex)| {
-            regex.is_match(text) && future_hostile_term_has_debt_context(term, &lower)
+            term_matches_outside_path_segment(regex, text)
+                && future_hostile_term_has_debt_context(term, &lower)
         })
         .map(|(term, _)| term.clone())
 }
 
+/// Words that mark debt on their own. Every other future-hostile word is ordinary engineering
+/// vocabulary (a stale fence, an axum `.fallback(..)` route, a `temporary` path for an atomic
+/// write, an invite in the `unused` state, a `legacy` protocol value, an API being `deprecated`)
+/// and marks debt only when the same human-language span also states an intent to remove,
+/// replace or retire it.
+const ALWAYS_DEBT_TERMS: &[&str] = &[
+    "cleanup later",
+    "remove later",
+    "best effort",
+    "dead code",
+    "depricated",
+    "workaround",
+    "obsolete",
+    "fixme",
+    "todo",
+];
+
+/// Phrases that state an abandonment, migration, or later-removal intent.
+const DEBT_CONTEXT_MARKERS: &[&str] = &[
+    "remove",
+    "cleanup",
+    "clean up",
+    "delete",
+    "replace later",
+    "for now",
+    "until ",
+    "after migration",
+    "migrate away",
+    "abandon",
+    "retire",
+    "deprecate",
+];
+
 fn future_hostile_term_has_debt_context(term: &str, lower: &str) -> bool {
-    if matches!(
-        term,
-        "cleanup later"
-            | "remove later"
-            | "best effort"
-            | "dead code"
-            | "deprecated"
-            | "depricated"
-            | "temporary"
-            | "workaround"
-            | "obsolete"
-            | "fixme"
-            | "todo"
-    ) {
+    if ALWAYS_DEBT_TERMS.contains(&term) {
         return true;
     }
-
     // Short lifecycle words are common domain vocabulary (legacy protocol values, stale fences,
-    // fallback results). They become debt markers only when the same human-language span states
-    // an abandonment, migration, or later-removal intent.
-    [
-        "remove",
-        "cleanup",
-        "delete",
-        "replace later",
-        "for now",
-        "until ",
-        "after migration",
-        "migrate away",
-        "abandon",
-        "retire",
-        "deprecate",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    // fallback results, temporary files, deprecated API fields). They become debt markers only
+    // when the same human-language span states an abandonment, migration, or later-removal
+    // intent. The term never supplies its own context (`deprecated` contains `deprecate`).
+    let rest = lower.replace(term, " ");
+    DEBT_CONTEXT_MARKERS
+        .iter()
+        .any(|marker| rest.contains(marker))
+}
+
+/// True when `regex` matches `text` somewhere that is not one segment of a path or ref
+/// (`todo/011`, `queue/stale/`): those name a place, not a marker.
+fn term_matches_outside_path_segment(regex: &Regex, text: &str) -> bool {
+    regex.find_iter(text).any(|m| {
+        let before = text[..m.start()].chars().next_back();
+        let after = text[m.end()..].chars().next();
+        before != Some('/') && after != Some('/')
+    })
+}
+
+/// The text inside the string literals of one line of code (`"…"`, `'…'`, `` `…` ``), joined
+/// by spaces. An unterminated literal (a multi-line string) runs to the end of the line.
+fn string_literal_text(line: &str) -> String {
+    let mut out = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in line.chars() {
+        match quote {
+            Some(q) => {
+                if escaped {
+                    escaped = false;
+                    out.push(ch);
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == q {
+                    quote = None;
+                    out.push(' ');
+                } else {
+                    out.push(ch);
+                }
+            }
+            None if matches!(ch, '"' | '\'' | '`') => quote = Some(ch),
+            None => {}
+        }
+    }
+    out
+}
+
+/// Minified or vendored code is not authored here: its words are someone else's.
+fn is_minified_or_vendored(file: &FileInfo) -> bool {
+    let path = file.rel_path.to_ascii_lowercase();
+    if [".min.js", ".min.mjs", ".min.cjs", ".min.css"]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+        || ["/vendor/", "/vendored/", "third_party/", "node_modules/"]
+            .iter()
+            .any(|part| path.contains(part) || path.starts_with(part.trim_start_matches('/')))
+    {
+        return true;
+    }
+    let lines = file.text.lines().count().max(1);
+    let longest = file.text.lines().map(str::len).max().unwrap_or(0);
+    longest > 1000 && file.text.len() / lines > 300
 }
 
 /// True when `term` is the exact identifier being *declared* on `active` — a field/binding
@@ -2371,6 +2508,7 @@ fn future_hostile_term_regexes() -> &'static [(String, Regex)] {
 
 fn is_future_hostile_allowlisted(file: &FileInfo) -> bool {
     file.is_generated
+        || is_minified_or_vendored(file)
         || FUTURE_HOSTILE_ALLOWLIST_PREFIXES
             .iter()
             .any(|p| file.rel_path.starts_with(p))
@@ -3237,6 +3375,151 @@ fn finding_count(row: &Value) -> Result<u64> {
         assert!(
             hits[0].text.contains("it.skip("),
             "framework skip call should be detected"
+        );
+    }
+
+    #[test]
+    fn future_hostile_hits_skip_domain_vocabulary_without_debt_intent() {
+        // Each line is a real false positive from 1.6.11: domain words, framework APIs and
+        // atomic-write temporaries, none of which states an intent to remove anything.
+        let text = [
+            "#[error(\"stale fence: job holds {held}, caller presented {presented}\")]",
+            "Router::new().fallback(serve)",
+            ".fallback(not_found)",
+            "let temporary = parent.join(format!(\".{name}.{}.tmp\", std::process::id()));",
+            "let file = tokio::fs::File::create(&temporary)",
+            "\"unused\"",
+            "return Err(refused(\"legacy Search fixed service mismatch\"));",
+            "\"Anything being deprecated, and what to do before it goes\",",
+            "match tokio::fs::remove_file(&self.temporary).await {",
+            "Err(error).with_context(|| format!(\"remove {}\", self.temporary.display()))",
+        ]
+        .join("\n");
+        // The same lines through both paths: the Rust lexer and the non-Rust line scan.
+        for path in ["apps/api/src/lib.rs", "apps/api/src/lib.ts"] {
+            let ctx = make_ctx(vec![product_file(path, &text)]);
+            let hits = future_hostile_hits(&ctx);
+            assert!(
+                hits.is_empty(),
+                "{path}: domain vocabulary was flagged: {:?}",
+                hits.iter().map(|h| &h.text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn future_hostile_hits_keep_strong_markers_and_stated_intent() {
+        let text = [
+            "let mode = \"workaround for the old parser\";",
+            "let shim = \"compat shim, remove after migration\";",
+            "let note = \"temporary until the v2 endpoint ships\";",
+            "let api = \"deprecated, remove in v3\";",
+        ]
+        .join("\n");
+        for path in ["apps/api/src/lib.rs", "apps/api/src/lib.ts"] {
+            let ctx = make_ctx(vec![product_file(path, &text)]);
+            let hits = future_hostile_hits(&ctx);
+            assert_eq!(
+                hits.len(),
+                4,
+                "{path}: expected every debt marker: {:?}",
+                hits.iter().map(|h| &h.text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn future_hostile_weak_words_in_non_rust_code_need_a_string_literal() {
+        // Outside string literals a weak word is an identifier, even next to `remove`.
+        let text = "fs.removeSync(temporary); cleanupLegacy(legacy);\n";
+        let ctx = make_ctx(vec![product_file("apps/web/src/io.ts", text)]);
+        assert!(future_hostile_hits(&ctx).is_empty());
+        // Strong markers still count anywhere on the line.
+        let ctx = make_ctx(vec![product_file(
+            "apps/web/src/io.ts",
+            "const x = workaround(); // keep\n",
+        )]);
+        assert_eq!(future_hostile_hits(&ctx).len(), 1);
+    }
+
+    #[test]
+    fn future_hostile_hits_skip_path_segments_and_minified_vendor_code() {
+        let script =
+            "echo \"fleet is read. queue todo/011 and app todo/271 are those two halves.\"\n";
+        let rust = "const QUEUE: &str = \"todo/011\";\n";
+        let minified = format!("var hljs=(()=>{{/* FIXME */{}}})();\n", "x".repeat(2000));
+        let ctx = make_ctx(vec![
+            product_file("apps/api/src/fleet.sh", script),
+            product_file("apps/api/src/queue.rs", rust),
+            product_file("apps/web/src/highlight.min.js", &minified),
+            product_file(
+                "apps/web/src/vendor/lib.js",
+                "const legacy = \"remove later\";\n",
+            ),
+        ]);
+        let hits = future_hostile_hits(&ctx);
+        assert!(
+            hits.is_empty(),
+            "paths, minified and vendored code were flagged: {:?}",
+            hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn todo_and_fallback_hits_skip_minified_and_vendored_code() {
+        let minified = format!(
+            "var a=x.catch(()=>{{}});var b=y.catch(()=>{{}});/* TODO */{}\n",
+            "x".repeat(2000)
+        );
+        let vendored = "// TODO: upstream\nconst a = f().catch(() => {});\nconst b = g().catch(() => {});\nlet t = \"TODO\";\n";
+        let ctx = make_ctx(vec![
+            product_file("apps/web/src/bundle.min.js", &minified),
+            product_file("apps/web/src/vendor/upstream.js", vendored),
+        ]);
+        assert!(todo_hits(&ctx).is_empty());
+        assert!(fallback_hits(&ctx).is_empty());
+    }
+
+    #[test]
+    fn wrong_layer_db_hits_ignore_interface_copy_and_comments() {
+        let ui = "const label = \"Select a file from the list\";\nconst err = \"delete failed\";\nconst hint = \"Select a dataset from the sidebar\";\n";
+        let commented = "// SELECT id FROM users is done by the adapter\nfn render() {}\n";
+        let ctx = make_ctx(vec![
+            product_file("src/ui.ts", ui),
+            product_file("src/view.rs", commented),
+        ]);
+        let hits = wrong_layer_db_hits(&ctx);
+        assert!(
+            hits.is_empty(),
+            "copy or comments were flagged: {:?}",
+            hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn wrong_layer_db_hits_flag_real_queries_at_their_line() {
+        let upper = "fn load() {\n    let q = \"SELECT id FROM users\";\n}\n";
+        let lower = "fn find(id: i64) {\n    run(\"select id from users where id = $1\", id);\n}\n";
+        let driver = "use sqlx::PgPool;\n";
+        let multi = "export function load() {\n  return db.query(`\n    SELECT id\n      FROM users`);\n}\n";
+        let ctx = make_ctx(vec![
+            product_file("src/a.rs", upper),
+            product_file("src/b.rs", lower),
+            product_file("crates/domain/src/c.rs", driver),
+            product_file("apps/web/src/d.ts", multi),
+        ]);
+        let mut hits = wrong_layer_db_hits(&ctx);
+        hits.sort_by(|x, y| x.path.cmp(&y.path));
+        let got: Vec<(String, Option<usize>)> =
+            hits.iter().map(|h| (h.path.clone(), h.line)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("apps/web/src/d.ts".to_string(), Some(3)),
+                ("crates/domain/src/c.rs".to_string(), Some(1)),
+                ("src/a.rs".to_string(), Some(2)),
+                ("src/b.rs".to_string(), Some(2)),
+            ]
         );
     }
 

@@ -195,3 +195,134 @@ mod dead_language_allow_tests {
         assert!(parse_dead_language_allow_terms("not = valid = toml =").is_empty());
     }
 }
+
+/// Migrations already applied to a live database: one entry per migrations directory, naming
+/// the last applied file. Files in that directory that sort at or before it are frozen —
+/// editing them would break the migration tool's checksums — so migration-safety rules judge
+/// only migrations added after it. Statement checks that apply to any SQL still run.
+///
+/// ```toml
+/// [sql_migrations]
+/// applied_through = ["migrations/0067_prediction_readiness.sql"]
+/// ```
+pub fn applied_migrations_through(root: &Path) -> Vec<String> {
+    std::fs::read_to_string(root.join("agent/audit-policy.toml"))
+        .ok()
+        .map(|text| parse_applied_migrations_through(&text))
+        .unwrap_or_default()
+}
+
+fn parse_applied_migrations_through(text: &str) -> Vec<String> {
+    #[derive(Debug, Deserialize, Default)]
+    struct PolicyFile {
+        #[serde(default)]
+        sql_migrations: SqlMigrationsPolicy,
+    }
+    #[derive(Debug, Deserialize, Default)]
+    struct SqlMigrationsPolicy {
+        #[serde(default)]
+        applied_through: Vec<String>,
+    }
+    toml::from_str::<PolicyFile>(text)
+        .ok()
+        .map(|parsed| {
+            parsed
+                .sql_migrations
+                .applied_through
+                .into_iter()
+                .map(|path| path.trim().trim_start_matches("./").to_string())
+                .filter(|path| !path.is_empty() && path.contains('/'))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True when `rel_path` is a migration at or before an `applied_through` entry in its directory.
+pub fn migration_is_applied(rel_path: &str, applied_through: &[String]) -> bool {
+    let (dir, name) = match rel_path.rsplit_once('/') {
+        Some(parts) => parts,
+        None => return false,
+    };
+    applied_through.iter().any(|last| {
+        last.rsplit_once('/')
+            .map(|(last_dir, last_name)| last_dir == dir && name <= last_name)
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(test)]
+mod applied_migration_tests {
+    use super::*;
+
+    #[test]
+    fn applied_through_freezes_only_earlier_files_in_the_same_directory() {
+        let policy = parse_applied_migrations_through(
+            "[sql_migrations]\napplied_through = [\"migrations/0067_readiness.sql\"]\n",
+        );
+        assert!(migration_is_applied(
+            "migrations/0002_datasets.sql",
+            &policy
+        ));
+        assert!(migration_is_applied(
+            "migrations/0067_readiness.sql",
+            &policy
+        ));
+        assert!(!migration_is_applied("migrations/0068_next.sql", &policy));
+        assert!(!migration_is_applied(
+            "db/migrations/0002_datasets.sql",
+            &policy
+        ));
+        assert!(parse_applied_migrations_through(
+            "[sql_migrations]\napplied_through = [\"nodir.sql\"]\n"
+        )
+        .is_empty());
+    }
+}
+
+/// Whether the reference folder layout (`profile_structure`) is enforced; default true.
+///
+/// ```toml
+/// [reference_profile]
+/// enforce = false
+/// ```
+pub fn reference_profile_enforced(root: &Path) -> bool {
+    std::fs::read_to_string(root.join("agent/audit-policy.toml"))
+        .ok()
+        .map(|text| parse_reference_profile_enforced(&text))
+        .unwrap_or(true)
+}
+
+fn parse_reference_profile_enforced(text: &str) -> bool {
+    #[derive(Debug, Deserialize, Default)]
+    struct PolicyFile {
+        #[serde(default)]
+        reference_profile: Option<ReferenceProfilePolicy>,
+    }
+    #[derive(Debug, Deserialize)]
+    struct ReferenceProfilePolicy {
+        #[serde(default = "enforce_default")]
+        enforce: bool,
+    }
+    fn enforce_default() -> bool {
+        true
+    }
+    toml::from_str::<PolicyFile>(text)
+        .ok()
+        .and_then(|parsed| parsed.reference_profile)
+        .map(|policy| policy.enforce)
+        .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod reference_profile_tests {
+    use super::*;
+
+    #[test]
+    fn reference_profile_is_enforced_unless_a_repository_opts_out() {
+        assert!(parse_reference_profile_enforced(""));
+        assert!(parse_reference_profile_enforced("[reference_profile]\n"));
+        assert!(!parse_reference_profile_enforced(
+            "[reference_profile]\nenforce = false\n"
+        ));
+    }
+}
