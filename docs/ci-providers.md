@@ -57,8 +57,10 @@ runs = ["jankurai audit", "cargo audit", "gitleaks"]
 * each `[[lane]]` gives the lane's `name`, the `command` the forge runs, and the
   tools the lane claims to `run` (`runs` is optional).
 * `command` is resolved offline against the repository: `just <recipe>` and
-  `make <target>` resolve to that recipe's body, `bash <path>` and `sh <path>`
-  to that file. The body is then followed one hop at a time into the files it
+  `make <target>` resolve to that recipe's body plus the bodies of the recipes
+  it depends on (`required: fast security` runs `fast` and `security`; a
+  dependency that is not a recipe adds nothing), `bash <path>` and
+  `sh <path>` to that file. The body is then followed one hop at a time into the files it
   calls, so a thin recipe that delegates to `bash scripts/<lane>.sh` still
   exposes the commands that script runs.
 

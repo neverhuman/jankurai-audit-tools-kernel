@@ -272,11 +272,29 @@ fn lane_body(files: &[FileInfo], command: &str) -> Option<(String, String)> {
 }
 
 /// Body of a `<name>:`-headed recipe or target as written in a Justfile or
-/// Makefile: the indented lines that follow the header.
+/// Makefile: the indented lines that follow the header, followed by the bodies
+/// of the recipes it depends on. A gate written as `required: fast security`
+/// runs `fast` and `security` first, so their commands are the lane's commands.
+/// Dependencies are followed only when a recipe of that name exists, bounded by
+/// [`MAX_EXPANSION_DEPTH`] and visited once each.
 fn recipe_body(text: &str, name: &str) -> Option<String> {
+    recipe_closure(text, name, &mut BTreeSet::new(), 0)
+}
+
+fn recipe_closure(
+    text: &str,
+    name: &str,
+    visited: &mut BTreeSet<String>,
+    depth: usize,
+) -> Option<String> {
     let header = format!("{name}:");
     let mut lines = text.lines();
-    lines.find(|line| !line.starts_with([' ', '\t']) && line.trim_end().starts_with(&header))?;
+    let header_line = lines.find(|line| {
+        !line.starts_with([' ', '\t'])
+            && line.trim_end().starts_with(&header)
+            && !line[header.len()..].starts_with('=')
+    })?;
+    visited.insert(name.to_string());
     let mut body = String::new();
     for line in lines {
         if !line.trim().is_empty() && !line.starts_with([' ', '\t']) {
@@ -284,6 +302,28 @@ fn recipe_body(text: &str, name: &str) -> Option<String> {
         }
         body.push_str(line);
         body.push('\n');
+    }
+    if depth >= MAX_EXPANSION_DEPTH {
+        return Some(body);
+    }
+    let dependencies = header_line[header.len()..]
+        .split('#')
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter(|word| {
+            word.chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for dependency in dependencies {
+        if visited.contains(&dependency) {
+            continue;
+        }
+        if let Some(dependency_body) = recipe_closure(text, &dependency, visited, depth + 1) {
+            body.push_str(&dependency_body);
+        }
     }
     Some(body)
 }
@@ -569,6 +609,40 @@ mod tests {
         assert!(surface.has(CiProvider::Jeryu));
         assert_eq!(surface.lanes[0].verified_tools, vec!["jankurai audit"]);
         assert!(rendered.contains("schema_version = \"2\""));
+    }
+
+    #[test]
+    fn lane_credit_follows_the_recipes_the_gate_depends_on() {
+        let files = vec![
+            declaration(),
+            file(
+                "Justfile",
+                "tool := \"x\"\nrequired: fast security # the gate\n\nfast:\n    cargo test\n\nsecurity: fast\n    cargo audit\n    gitleaks detect\n\nunused:\n    jankurai audit .\n",
+            ),
+        ];
+        let surface = detect(&files);
+        assert!(surface.has(CiProvider::Jeryu));
+        let lane = &surface.lanes[0];
+        assert!(lane.text.contains("cargo test"));
+        assert!(lane.text.contains("cargo audit"));
+        assert_eq!(lane.verified_tools, vec!["gitleaks"]);
+        assert_eq!(lane.unverified_tools, vec!["jankurai audit"]);
+        assert_eq!(lane.text.matches("cargo test").count(), 1);
+    }
+
+    #[test]
+    fn a_dependency_that_is_not_a_recipe_adds_nothing() {
+        let files = vec![
+            declaration(),
+            file("Makefile", "required: build/out.bin\n\tcargo test\n"),
+        ];
+        let lanes = vec![DeclaredLane {
+            name: "required".into(),
+            command: "make required".into(),
+            runs: vec![],
+        }];
+        let lane = resolve_lane(&files, &lanes[0]).expect("make target resolves");
+        assert_eq!(lane.text.trim(), "cargo test");
     }
 
     #[test]

@@ -27,7 +27,9 @@ version string lives in [`VERSION`](VERSION).
   cross-checked against the real content of the lane it names. Repair routes
   point forge-gated repositories at their declaration instead of at
   `.github/workflows/jankurai.yml`. Older schema-`"1"` `.jeryu/ci.toml` files
-  parse but are not evidence; `agent/ci.toml` is not read. See
+  parse but are not evidence; `agent/ci.toml` is not read. A `just`/`make`
+  lane includes the recipes it depends on, so a dependency-only gate such as
+  `required: fast security jankurai` is read in full. See
   `docs/ci-providers.md`.
 - Public auditor identity is `1.7.1`. Standard `0.9.0` and schema `1.9.0` are unchanged.
   A stored scan whose `last_full_auditor_version` differs from this identity runs a full scan.
