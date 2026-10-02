@@ -286,3 +286,28 @@ fn declaration_in_the_agent_folder_is_ignored() {
     assert!(!ci_provider::detect(&ctx.all_files).has(ci_provider::CiProvider::Jeryu));
     assert!(!helpers::has_jankurai_audit_ci_lane(ctx));
 }
+
+// CI-cap findings (no audit lane, no security lane, no scans) point at the
+// surface that gates the repository.
+#[test]
+fn ci_findings_path_follows_the_provider() {
+    let forge = build(&[
+        (".jeryu/ci.toml", DECLARATION),
+        ("Justfile", THIN_JUSTFILE),
+        ("scripts/gate.sh", EMPTY_GATE),
+    ]);
+    assert_eq!(
+        ci_provider::ci_findings_path(&forge.ctx.all_files),
+        ".jeryu/ci.toml"
+    );
+    let github = build(&[(".github/workflows/ci.yml", WORKFLOW)]);
+    assert_eq!(
+        ci_provider::ci_findings_path(&github.ctx.all_files),
+        ".github/workflows"
+    );
+    let none = build(&[]);
+    assert_eq!(
+        ci_provider::ci_findings_path(&none.ctx.all_files),
+        ".github/workflows"
+    );
+}

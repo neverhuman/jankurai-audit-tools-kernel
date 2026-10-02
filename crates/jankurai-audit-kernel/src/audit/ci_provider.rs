@@ -455,6 +455,15 @@ pub fn audit_lane_anchor_path(files: &[FileInfo]) -> &'static str {
     detect(files).primary().ci_anchor_path()
 }
 
+/// Where a CI-cap finding (no audit lane, no security lane, no scans) points:
+/// the declaration of a forge-gated repository, else the workflow directory.
+pub fn ci_findings_path(files: &[FileInfo]) -> &'static str {
+    match detect(files).primary() {
+        CiProvider::GithubActions => ".github/workflows",
+        CiProvider::Jeryu => JERYU_DECLARATION_PATH,
+    }
+}
+
 /// Provider-correct repair instruction for "CI does not run the audit lane".
 /// A forge-gated repository is never told to add a workflow file the forge
 /// would not execute.
@@ -636,12 +645,12 @@ mod tests {
             declaration(),
             file("Makefile", "required: build/out.bin\n\tcargo test\n"),
         ];
-        let lanes = vec![DeclaredLane {
+        let declared = DeclaredLane {
             name: "required".into(),
             command: "make required".into(),
             runs: vec![],
-        }];
-        let lane = resolve_lane(&files, &lanes[0]).expect("make target resolves");
+        };
+        let lane = resolve_lane(&files, &declared).expect("make target resolves");
         assert_eq!(lane.text.trim(), "cargo test");
     }
 

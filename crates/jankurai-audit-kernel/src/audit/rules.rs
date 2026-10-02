@@ -998,7 +998,7 @@ pub const RULES: &[RuleSpec] = &[
         repair_eligibility: RepairEligibility::AgentAssisted,
         repair_risk: RepairRisk::Low,
         repair_reason:
-            "adding the missing README links, stack statement, badge, or quick-start is mechanical doc editing",
+            "adding the missing stack statement, badge, quick-start, or an `@AGENTS.md` import is mechanical doc editing",
         status: RuleStatus::Experimental,
         standard_section: "Jankurai Pillar: Variety and Canonical Shape",
         cap_key: None,
