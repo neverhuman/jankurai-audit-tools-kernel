@@ -8,8 +8,17 @@ version string lives in [`VERSION`](VERSION).
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-10-02
+
 ### Changed
 
+- `HLT-001` dead-language scanning uses the governed split.5 rule for Rust as
+  for every other language: comment-only lines and trailing comments never
+  count; string literals and active code do. The Rust comment/string lexer path
+  is removed. (Owner decision X2.)
+- `ci_provider::ci_findings_path` names the surface a CI-cap finding points at:
+  `.jeryu/ci.toml` for a forge-gated repository, `.github/workflows` otherwise.
+- `HLT-047` repair reason names the `@AGENTS.md` import instead of README links.
 - `HLT-007-HANDWRITTEN-CONTRACT` accepts code-first contracts. A contract file
   under `contracts/` now counts as covered when a `[[zone]]` names it as
   generated output (`path` equal to the file or a directory holding it, with
@@ -31,7 +40,7 @@ version string lives in [`VERSION`](VERSION).
   lane includes the recipes it depends on, so a dependency-only gate such as
   `required: fast security jankurai` is read in full. See
   `docs/ci-providers.md`.
-- Public auditor identity is `1.7.1`. Standard `0.9.0` and schema `1.9.0` are unchanged.
+- Public auditor identity is `1.7.2`. Standard `0.9.0` and schema `1.9.0` are unchanged.
   A stored scan whose `last_full_auditor_version` differs from this identity runs a full scan.
 - Treat `reviewed_manual` generated-zone entries as review-governed source
   artifacts while retaining existence, metadata, and generator-only guards.
