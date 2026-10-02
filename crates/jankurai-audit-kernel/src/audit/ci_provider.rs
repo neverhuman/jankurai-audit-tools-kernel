@@ -11,9 +11,10 @@
 //! * [`CiProvider::GithubActions`] — workflow files under `.github/workflows/`.
 //!   Commands come from parsing the workflow YAML (unchanged behaviour).
 //! * [`CiProvider::Jeryu`] — a forge whose checks are configured forge-side and
-//!   are not committed as workflow files. Evidence comes from a checked-in
-//!   declaration (see [`JERYU_DECLARATION_PATHS`]) that names the provider and
-//!   its required lanes, cross-checked against the lane's real content.
+//!   are not committed as workflow files. Evidence comes from the checked-in
+//!   declaration at [`JERYU_DECLARATION_PATH`] (jeryu's own schema, version
+//!   [`JERYU_SCHEMA_VERSION`]) that names the provider and its required lanes,
+//!   cross-checked against the lane's real content.
 //!
 //! The cross-check is what keeps the declaration honest: a lane earns credit
 //! only through the text of the recipe or script it resolves to, so a
@@ -46,18 +47,20 @@ impl CiProvider {
     pub const fn ci_anchor_path(self) -> &'static str {
         match self {
             CiProvider::GithubActions => ".github/workflows/jankurai.yml",
-            CiProvider::Jeryu => JERYU_PRIMARY_DECLARATION_PATH,
+            CiProvider::Jeryu => JERYU_DECLARATION_PATH,
         }
     }
 }
 
-/// Checked-in declaration paths recognised for the jeryu provider. Both spell
-/// the same schema; `agent/ci.toml` keeps CI policy with the rest of the agent
-/// control plane, `.jeryu/ci.toml` suits repositories that group forge config.
-pub const JERYU_DECLARATION_PATHS: &[&str] = &["agent/ci.toml", ".jeryu/ci.toml"];
+/// The one checked-in declaration recognised for the jeryu provider. The file
+/// and its schema are owned by jeryu; the audit only reads it. It is also the
+/// path `jankurai ci install --jeryu` writes.
+pub const JERYU_DECLARATION_PATH: &str = ".jeryu/ci.toml";
 
-/// The declaration path `jankurai ci install --jeryu` writes.
-pub const JERYU_PRIMARY_DECLARATION_PATH: &str = "agent/ci.toml";
+/// The declaration schema version that carries lanes. Older `.jeryu/ci.toml`
+/// files (version `"1"`, with flags such as `github_actions_required` and no
+/// `provider`) still parse but are not jeryu CI evidence.
+pub const JERYU_SCHEMA_VERSION: &str = "2";
 
 const MAX_DECLARATION_BYTES: usize = 64 * 1024;
 const MAX_LANES: usize = 32;
@@ -128,8 +131,7 @@ pub fn is_github_workflow_yaml_path(path: &str) -> bool {
 
 /// A checked-in jeryu declaration.
 pub fn is_jeryu_declaration_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    JERYU_DECLARATION_PATHS.contains(&lower.as_str())
+    path.eq_ignore_ascii_case(JERYU_DECLARATION_PATH)
 }
 
 /// A path that carries this repository's CI evidence for some supported
@@ -156,11 +158,31 @@ pub fn is_ci_config_path(path: &str) -> bool {
 
 // --- Declaration ------------------------------------------------------------
 
+/// The declaration as written. Every field is optional at parse time so an
+/// older or foreign `.jeryu/ci.toml` reads cleanly and is then rejected by
+/// [`DeclarationFile::is_jeryu_v2`] instead of failing to parse.
 #[derive(Deserialize)]
 struct DeclarationFile {
-    provider: String,
+    #[serde(default)]
+    schema_version: Option<toml::Value>,
+    #[serde(default)]
+    provider: Option<String>,
     #[serde(default)]
     lane: Vec<DeclaredLane>,
+}
+
+impl DeclarationFile {
+    fn is_jeryu_v2(&self) -> bool {
+        let version = matches!(
+            &self.schema_version,
+            Some(toml::Value::String(version)) if version == JERYU_SCHEMA_VERSION
+        );
+        let provider = self
+            .provider
+            .as_deref()
+            .is_some_and(|provider| provider.eq_ignore_ascii_case(CiProvider::Jeryu.id()));
+        version && provider
+    }
 }
 
 #[derive(Deserialize)]
@@ -196,21 +218,14 @@ pub fn detect(files: &[FileInfo]) -> CiSurface {
 }
 
 fn jeryu_declaration(files: &[FileInfo]) -> Option<DeclarationFile> {
-    for path in JERYU_DECLARATION_PATHS {
-        let Some(file) = files.iter().find(|file| file.rel_path == *path) else {
-            continue;
-        };
-        if file.text.len() > MAX_DECLARATION_BYTES {
-            continue;
-        }
-        let Ok(parsed) = toml::from_str::<DeclarationFile>(&file.text) else {
-            continue;
-        };
-        if parsed.provider.eq_ignore_ascii_case(CiProvider::Jeryu.id()) {
-            return Some(parsed);
-        }
+    let file = files
+        .iter()
+        .find(|file| file.rel_path == JERYU_DECLARATION_PATH)?;
+    if file.text.len() > MAX_DECLARATION_BYTES {
+        return None;
     }
-    None
+    let parsed = toml::from_str::<DeclarationFile>(&file.text).ok()?;
+    parsed.is_jeryu_v2().then_some(parsed)
 }
 
 fn resolve_lane(files: &[FileInfo], declared: &DeclaredLane) -> Option<CiLane> {
@@ -407,7 +422,7 @@ pub fn audit_lane_fix(files: &[FileInfo]) -> String {
     match detect(files).primary() {
         CiProvider::GithubActions => "add a CI job that runs `jankurai audit . --json target/jankurai/repo-score.json --md target/jankurai/repo-score.md` and uploads both artifacts".into(),
         CiProvider::Jeryu => format!(
-            "add the audit to the lane your forge runs and declare it in `{JERYU_PRIMARY_DECLARATION_PATH}`: the lane command must really run `jankurai audit . --json target/jankurai/repo-score.json --md target/jankurai/repo-score.md`"
+            "add the audit to the lane your forge runs and declare it in `{JERYU_DECLARATION_PATH}`: the lane command must really run `jankurai audit . --json target/jankurai/repo-score.json --md target/jankurai/repo-score.md`"
         ),
     }
 }
@@ -424,6 +439,7 @@ pub fn jeryu_declaration_template(lane: &str, command: &str, runs: &[&str]) -> S
         "# CI provider declaration. The forge configures its checks forge-side,\n\
          # so there is no committed workflow file to read; this names the lanes it\n\
          # runs. Credit comes from the lane's real content, never from this file.\n\
+         schema_version = \"{JERYU_SCHEMA_VERSION}\"\n\
          provider = \"jeryu\"\n\
          \n\
          [[lane]]\n\
@@ -452,8 +468,8 @@ mod tests {
 
     fn declaration() -> FileInfo {
         file(
-            "agent/ci.toml",
-            "provider = \"jeryu\"\n\n[[lane]]\nname = \"required\"\ncommand = \"just required\"\nruns = [\"jankurai audit\", \"gitleaks\"]\n",
+            ".jeryu/ci.toml",
+            "schema_version = \"2\"\nprovider = \"jeryu\"\n\n[[lane]]\nname = \"required\"\ncommand = \"just required\"\nruns = [\"jankurai audit\", \"gitleaks\"]\n",
         )
     }
 
@@ -505,8 +521,8 @@ mod tests {
     fn another_providers_declaration_is_not_jeryu_evidence() {
         let files = vec![
             file(
-                "agent/ci.toml",
-                "provider = \"github-actions\"\n\n[[lane]]\nname = \"required\"\ncommand = \"just required\"\n",
+                ".jeryu/ci.toml",
+                "schema_version = \"2\"\nprovider = \"github-actions\"\n\n[[lane]]\nname = \"required\"\ncommand = \"just required\"\n",
             ),
             file("Justfile", "required:\n    jankurai audit .\n"),
         ];
@@ -537,8 +553,8 @@ mod tests {
             declaration(),
             file("Justfile", "required:\n    jankurai audit .\n"),
         ];
-        assert_eq!(audit_lane_anchor_path(&files), "agent/ci.toml");
-        assert!(audit_lane_fix(&files).contains("agent/ci.toml"));
+        assert_eq!(audit_lane_anchor_path(&files), ".jeryu/ci.toml");
+        assert!(audit_lane_fix(&files).contains(".jeryu/ci.toml"));
         assert!(!audit_lane_fix(&files).contains(".github/workflows"));
     }
 
@@ -546,11 +562,56 @@ mod tests {
     fn rendered_declaration_is_detected_by_the_detector() {
         let rendered = jeryu_declaration_template("required", "just required", &["jankurai audit"]);
         let files = vec![
-            file("agent/ci.toml", &rendered),
+            file(".jeryu/ci.toml", &rendered),
             file("Justfile", "required:\n    jankurai audit .\n"),
         ];
         let surface = detect(&files);
         assert!(surface.has(CiProvider::Jeryu));
         assert_eq!(surface.lanes[0].verified_tools, vec!["jankurai audit"]);
+        assert!(rendered.contains("schema_version = \"2\""));
+    }
+
+    #[test]
+    fn a_schema_version_1_declaration_parses_and_is_not_jeryu_evidence() {
+        let files = vec![
+            file(
+                ".jeryu/ci.toml",
+                "schema_version = \"1\"\ngithub_actions_required = true\n",
+            ),
+            file("Justfile", "required:\n    jankurai audit .\n"),
+        ];
+        let parsed: DeclarationFile = toml::from_str(&files[0].text).expect("v1 parses");
+        assert!(!parsed.is_jeryu_v2());
+        let surface = detect(&files);
+        assert!(surface.providers.is_empty());
+        assert!(surface.unresolved_lanes.is_empty());
+        assert_eq!(
+            audit_lane_anchor_path(&files),
+            ".github/workflows/jankurai.yml"
+        );
+    }
+
+    #[test]
+    fn a_declaration_without_schema_version_2_is_not_jeryu_evidence() {
+        let lanes =
+            "provider = \"jeryu\"\n\n[[lane]]\nname = \"required\"\ncommand = \"just required\"\n";
+        for header in ["", "schema_version = \"1\"\n", "schema_version = 2\n"] {
+            let files = vec![
+                file(".jeryu/ci.toml", &format!("{header}{lanes}")),
+                file("Justfile", "required:\n    jankurai audit .\n"),
+            ];
+            assert!(!detect(&files).has(CiProvider::Jeryu), "{header:?}");
+        }
+    }
+
+    #[test]
+    fn the_agent_folder_is_not_a_declaration_path() {
+        let text = declaration().text;
+        let files = vec![
+            file("agent/ci.toml", &text),
+            file("Justfile", "required:\n    jankurai audit .\n"),
+        ];
+        assert!(!is_jeryu_declaration_path("agent/ci.toml"));
+        assert!(!detect(&files).has(CiProvider::Jeryu));
     }
 }

@@ -53,6 +53,7 @@ const PRODUCT: &[(&str, &str)] = &[
 ];
 
 const DECLARATION: &str = "\
+schema_version = \"2\"
 provider = \"jeryu\"
 
 [[lane]]
@@ -105,7 +106,7 @@ fn build(extra: &[(&str, &str)]) -> Fixture {
 #[test]
 fn forge_declaration_backed_by_a_real_lane_earns_ci_credit() {
     let f = build(&[
-        ("agent/ci.toml", DECLARATION),
+        (".jeryu/ci.toml", DECLARATION),
         ("Justfile", THIN_JUSTFILE),
         ("scripts/gate.sh", FULL_GATE),
     ]);
@@ -138,15 +139,16 @@ fn forge_declaration_backed_by_a_real_lane_earns_ci_credit() {
     // forge would not execute.
     assert_eq!(
         ci_provider::audit_lane_anchor_path(&ctx.all_files),
-        "agent/ci.toml"
+        ".jeryu/ci.toml"
     );
     let fix = ci_provider::audit_lane_fix(&ctx.all_files);
-    assert!(fix.contains("agent/ci.toml") && !fix.contains(".github/workflows"));
+    assert!(fix.contains(".jeryu/ci.toml") && !fix.contains(".github/workflows"));
+    assert!(!fix.contains("agent/ci.toml"));
     let (_, path, _, _) =
         finding_builder::dimension_soft_route_for(ctx, "Security and supply-chain posture");
-    assert_eq!(path, "agent/ci.toml");
+    assert_eq!(path, ".jeryu/ci.toml");
     assert_eq!(
-        finding_builder::evidence_kind_for_path("agent/ci.toml"),
+        finding_builder::evidence_kind_for_path(".jeryu/ci.toml"),
         "workflow-command"
     );
 }
@@ -155,7 +157,7 @@ fn forge_declaration_backed_by_a_real_lane_earns_ci_credit() {
 #[test]
 fn forge_declaration_without_a_real_lane_earns_nothing() {
     let f = build(&[
-        ("agent/ci.toml", DECLARATION),
+        (".jeryu/ci.toml", DECLARATION),
         ("Justfile", THIN_JUSTFILE),
         ("scripts/gate.sh", EMPTY_GATE),
     ]);
@@ -178,7 +180,7 @@ fn forge_declaration_without_a_real_lane_earns_nothing() {
 #[test]
 fn forge_declaration_naming_a_missing_lane_earns_nothing() {
     let f = build(&[
-        ("agent/ci.toml", DECLARATION),
+        (".jeryu/ci.toml", DECLARATION),
         ("Justfile", "fast:\n    cargo check\n"),
     ]);
     let ctx = &f.ctx;
@@ -234,10 +236,53 @@ fn repository_without_ci_still_gets_the_caps() {
 #[test]
 fn forge_declaration_does_not_attract_github_workflow_findings() {
     let f = build(&[
-        ("agent/ci.toml", DECLARATION),
+        (".jeryu/ci.toml", DECLARATION),
         ("Justfile", THIN_JUSTFILE),
         ("scripts/gate.sh", FULL_GATE),
     ]);
     let hits = scan::ci_hardening_hits(&f.ctx);
     assert!(hits.is_empty(), "{hits:?}");
+}
+
+/// The `.jeryu/ci.toml` older repositories already carry: schema version 1, a
+/// provider-policy flag, no `provider` and no lanes.
+const SCHEMA_V1_DECLARATION: &str = "schema_version = \"1\"\ngithub_actions_required = true\n";
+
+// A schema-1 `.jeryu/ci.toml` parses without error, is not jeryu evidence, and
+// draws no finding of its own; the repository scores as if it had no CI.
+#[test]
+fn schema_v1_jeryu_file_is_not_evidence_and_draws_no_finding() {
+    let f = build(&[
+        (".jeryu/ci.toml", SCHEMA_V1_DECLARATION),
+        ("Justfile", THIN_JUSTFILE),
+        ("scripts/gate.sh", FULL_GATE),
+    ]);
+    let ctx = &f.ctx;
+
+    let surface = ci_provider::detect(&ctx.all_files);
+    assert!(surface.providers.is_empty());
+    assert!(surface.lanes.is_empty());
+    assert!(surface.unresolved_lanes.is_empty());
+    assert!(!helpers::has_jankurai_audit_ci_lane(ctx));
+    assert!(!helpers::has_secret_or_dependency_scans(ctx));
+    assert_eq!(
+        ci_provider::audit_lane_anchor_path(&ctx.all_files),
+        ".github/workflows/jankurai.yml"
+    );
+    let hits = scan::ci_hardening_hits(ctx);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+// The old `agent/ci.toml` location is no longer read, even with a valid
+// schema-2 declaration in it.
+#[test]
+fn declaration_in_the_agent_folder_is_ignored() {
+    let f = build(&[
+        ("agent/ci.toml", DECLARATION),
+        ("Justfile", THIN_JUSTFILE),
+        ("scripts/gate.sh", FULL_GATE),
+    ]);
+    let ctx = &f.ctx;
+    assert!(!ci_provider::detect(&ctx.all_files).has(ci_provider::CiProvider::Jeryu));
+    assert!(!helpers::has_jankurai_audit_ci_lane(ctx));
 }
