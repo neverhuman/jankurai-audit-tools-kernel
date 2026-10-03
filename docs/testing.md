@@ -5,11 +5,27 @@ through `agent/test-map.json` to the smallest lane that proves the change.
 
 | Lane | Purpose |
 | --- | --- |
-| `required` | lightweight gate: workspace manifest resolves against the lock |
-| `fast` | deterministic local proof for most edits (`cargo check` + tests) |
+| `required` | merge gate: lock resolves, then fmt, clippy and the test suite |
+| `fast` | quick subset of `required` for most edits (`cargo check` + tests) |
 | `security` | secret scanning and dependency vulnerability scanning |
 | `audit` | jankurai repo score and hard-rule findings |
 | `gates` | aggregate gate: required, fast, security, and audit |
+
+## Required lane
+
+The required lane is the merge gate. It must fail when the kernel stops
+building, linting or testing, so it runs the full set:
+
+```bash
+just required
+bash scripts/ci-local.sh required
+```
+
+Both invoke `ops/ci/required.sh`, which runs `cargo metadata --no-deps
+--locked --offline`, `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets --locked --offline -- -D warnings` and `cargo nextest run
+--workspace --locked --offline`. Every command is offline against the locked
+graph, so `cargo fetch --locked` (see `just setup`) is the only setup step.
 
 ## Fast lane
 

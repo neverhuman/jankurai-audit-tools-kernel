@@ -5,10 +5,10 @@
 [[lane]]
 name = "required"
 command = "bash scripts/ci-local.sh required"
-purpose = "verify the workspace manifest resolves against the locked dependency graph"
+purpose = "merge gate: manifest resolves against the lock, then fmt, clippy -D warnings and the workspace test suite"
 command_id = "lane.required"
 kind = "validation"
-cost = 3
+cost = 6
 rules_covered = ["HLT-003-OWNERLESS-PATH", "HLT-004-UNMAPPED-PROOF"]
 required_artifacts = []
 timeout_seconds = 900
@@ -18,7 +18,7 @@ destructive = false
 [[lane]]
 name = "fast"
 command = "just fast"
-purpose = "deterministic fast lane: cargo check --workspace --locked + cargo nextest run --workspace"
+purpose = "quick subset of required: cargo check --workspace --locked + cargo nextest run --workspace --locked"
 command_id = "lane.fast"
 kind = "validation"
 cost = 5
