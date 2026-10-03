@@ -31,9 +31,9 @@ bash scripts/ci-local.sh required
 
 The native library does not need Node.js at runtime. The complete quality lane
 also needs the pinned security tools and auditor installed by the owning CI
-setup; see [testing](docs/testing.md) and
-[the workflow](.github/workflows/ci.yml). Local recipes are in the
-[Justfile](Justfile).
+setup; see [testing](docs/testing.md). Local recipes are in the
+[Justfile](Justfile). CI runs on the forge and our own hosts; GitHub is a
+publishing mirror only and runs no workflows.
 
 ## Layout
 

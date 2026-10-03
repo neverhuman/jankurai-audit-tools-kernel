@@ -5,8 +5,7 @@
 # security, hand-rolled coverage/contract drift checks) with first-class
 # subcommands. This lane runs each adopted command in CI and writes its
 # evidence artifact under target/jankurai/ so the audit can prove the
-# replacement actually executed. The matching artifacts are uploaded by the
-# workflow's actions/upload-artifact step.
+# replacement actually executed. The CI host keeps the matching artifacts.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"

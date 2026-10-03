@@ -1,5 +1,5 @@
 # Pinned Rust toolchain so local and CI builds never drift silently.
-# CI installs the same channel and components via dtolnay/rust-toolchain.
+# CI hosts use the same channel and components.
 [toolchain]
 channel = "1.97.1"
 components = ["rustfmt", "clippy"]

@@ -8,6 +8,13 @@ version string lives in [`VERSION`](VERSION).
 
 ## [Unreleased]
 
+### Removed
+
+- GitHub Actions workflows, the GitHub-only `ops/ci/aggregate.sh` /
+  `scripts/ci-aggregate.mjs` job-inventory check and its test, and the
+  workflow-lint (actionlint, zizmor) steps. GitHub is a publishing mirror only;
+  CI runs on the forge and our hosts.
+
 ## [1.7.2] - 2026-10-02
 
 ### Changed

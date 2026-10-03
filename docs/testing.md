@@ -20,7 +20,7 @@ just fast            # cargo check --workspace --locked + cargo nextest run --wo
 bash scripts/ci-local.sh fast
 ```
 
-Both invoke `ops/ci/fast.sh`, the exact script GitHub Actions runs, so local
+Both invoke `ops/ci/fast.sh`, the exact script forge-hosted CI runs, so local
 runs never drift from CI.
 
 ## Rust property and integration tests

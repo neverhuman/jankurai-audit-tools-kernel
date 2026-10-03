@@ -65,10 +65,6 @@
       "command": "bash scripts/ci-local.sh required",
       "purpose": "verify local CI helpers"
     },
-    ".github/": {
-      "command": "bash scripts/ci-local.sh required",
-      "purpose": "verify CI workflow entrypoints stay pinned and thin"
-    },
     ".cargo/": {
       "command": "cargo check --workspace --locked",
       "purpose": "verify the offline build configuration stays coherent"
