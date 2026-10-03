@@ -267,8 +267,99 @@ fn lane_body(files: &[FileInfo], command: &str) -> Option<(String, String)> {
             let file = files.iter().find(|file| file.rel_path == *script)?;
             Some((file.rel_path.clone(), file.text.clone()))
         }
+        ["npm", "test" | "t", ..] => package_lane(files, "test", true),
+        ["npm", "run" | "run-script", script, ..] => package_lane(files, script, true),
+        ["pnpm", "run", script, ..] | ["yarn", "run", script, ..] => {
+            package_lane(files, script, false)
+        }
+        ["yarn", script, ..] => package_lane(files, script, false),
         _ => None,
     }
+}
+
+/// Resolve a package-manager lane (`npm test`, `npm run <script>`,
+/// `pnpm run <script>`, `yarn <script>`) through the root `package.json`
+/// `scripts`. The script's text is the lane's text, followed into the scripts
+/// it runs in turn the same way a `just` recipe is followed into its
+/// dependencies: only scripts that exist, bounded by [`MAX_EXPANSION_DEPTH`],
+/// each visited once. `npm` also runs a script's `pre<name>` and `post<name>`
+/// hooks, so those are part of an npm lane.
+fn package_lane(files: &[FileInfo], script: &str, npm_hooks: bool) -> Option<(String, String)> {
+    let file = files.iter().find(|file| file.rel_path == "package.json")?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&file.text).ok()?;
+    let scripts: std::collections::BTreeMap<String, String> = parsed
+        .get("scripts")?
+        .as_object()?
+        .iter()
+        .filter_map(|(name, body)| Some((name.clone(), body.as_str()?.to_string())))
+        .collect();
+    let body = script_closure(&scripts, script, npm_hooks, &mut BTreeSet::new(), 0)?;
+    Some((file.rel_path.clone(), body))
+}
+
+fn script_closure(
+    scripts: &std::collections::BTreeMap<String, String>,
+    name: &str,
+    npm_hooks: bool,
+    visited: &mut BTreeSet<String>,
+    depth: usize,
+) -> Option<String> {
+    let script = scripts.get(name)?;
+    visited.insert(name.to_string());
+    let mut body = String::new();
+    let hooks = if npm_hooks {
+        [format!("pre{name}"), format!("post{name}")]
+    } else {
+        [String::new(), String::new()]
+    };
+    let follow = |target: &str, body: &mut String, visited: &mut BTreeSet<String>| {
+        if depth < MAX_EXPANSION_DEPTH && !target.is_empty() && !visited.contains(target) {
+            if let Some(text) = script_closure(scripts, target, npm_hooks, visited, depth + 1) {
+                body.push_str(&text);
+            }
+        }
+    };
+    follow(&hooks[0], &mut body, visited);
+    body.push_str(script);
+    body.push('\n');
+    for reference in script_references(script) {
+        follow(&reference, &mut body, visited);
+    }
+    follow(&hooks[1], &mut body, visited);
+    Some(body)
+}
+
+/// Script names a package script runs through a package manager:
+/// `npm run x`, `npm run-script x`, `npm test`, `pnpm run x`, `pnpm x`,
+/// `yarn run x`, `yarn x`, and the names passed to `run-s` / `run-p` /
+/// `npm-run-all`. Names that are not scripts are dropped by the caller.
+fn script_references(text: &str) -> Vec<String> {
+    let words: Vec<&str> = text
+        .split(|ch: char| ch.is_whitespace() || ";&|()".contains(ch))
+        .map(|word| word.trim_matches(|ch| ch == '"' || ch == '\''))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut references = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        let next = words.get(index + 1).copied().unwrap_or_default();
+        let after = words.get(index + 2).copied().unwrap_or_default();
+        match (*word, next) {
+            ("npm", "run" | "run-script") | ("pnpm" | "yarn", "run") => {
+                references.push(after.to_string())
+            }
+            ("npm", "test" | "t") => references.push("test".into()),
+            ("pnpm" | "yarn", name) => references.push(name.to_string()),
+            ("run-s" | "run-p" | "npm-run-all", _) => references.extend(
+                words[index + 1..]
+                    .iter()
+                    .filter(|name| !name.starts_with('-'))
+                    .take(MAX_LANES)
+                    .map(|name| name.to_string()),
+            ),
+            _ => {}
+        }
+    }
+    references
 }
 
 /// Body of a `<name>:`-headed recipe or target as written in a Justfile or
@@ -410,6 +501,81 @@ pub fn github_workflow_text(files: &[FileInfo]) -> String {
     text
 }
 
+/// True when the repository has GitHub Actions workflow files, by path only.
+pub fn has_github_workflows(files: &[FileInfo]) -> bool {
+    files
+        .iter()
+        .any(|file| is_github_workflow_path(&file.rel_path))
+}
+
+/// Markers that show a CI lane really reuses a build or dependency cache. This
+/// is the one list the jeryu side of the "CI cache hint" reads; it is kept
+/// conservative on purpose. The bare word `cache` is not a marker: it appears in
+/// comments, paths and `rm -rf` lines that cache nothing.
+pub const CI_CACHE_MARKERS: &[&str] = &[
+    "sccache",
+    "rustc_wrapper",
+    "cargo_target_dir",
+    "actions/cache",
+    "rust-cache",
+    "npm_config_cache",
+    "pip_cache_dir",
+    "uv_cache_dir",
+    "turbo_cache_dir",
+    "ccache",
+];
+
+/// Flags that ask a tool to use a cache: `--cache`, `--cache=<dir>`,
+/// `--cache-dir`, `--cache-from`, `--cache-to`, `--cache-location`. Matched
+/// per token so `git diff --cached` and `--no-cache` are not cache use.
+const CI_CACHE_FLAGS: &[&str] = &[
+    "--cache",
+    "--cache-dir",
+    "--cache-from",
+    "--cache-to",
+    "--cache-location",
+];
+
+/// Cache markers found in the command lines of `text` (comment lines and
+/// trailing ` #` comments are ignored). Returns each marker once, in list order.
+pub fn cache_markers_in(text: &str) -> Vec<&'static str> {
+    let mut found = BTreeSet::new();
+    for line in shell_lines(text) {
+        let command = line.split(" #").next().unwrap_or_default();
+        for marker in CI_CACHE_MARKERS {
+            if command.contains(marker) {
+                found.insert(*marker);
+            }
+        }
+        for token in command.split_whitespace() {
+            let flag = token.split('=').next().unwrap_or_default();
+            if let Some(matched) = CI_CACHE_FLAGS.iter().find(|candidate| **candidate == flag) {
+                found.insert(*matched);
+            }
+        }
+    }
+    CI_CACHE_MARKERS
+        .iter()
+        .chain(CI_CACHE_FLAGS)
+        .copied()
+        .filter(|marker| found.contains(marker))
+        .collect()
+}
+
+/// Cache markers in the resolved text of the declared jeryu lanes. Empty unless
+/// a lane resolves and really runs something that uses a cache.
+pub fn jeryu_lane_cache_markers(files: &[FileInfo]) -> Vec<&'static str> {
+    let mut markers = Vec::new();
+    for lane in detect(files).lanes {
+        for marker in cache_markers_in(&lane.text) {
+            if !markers.contains(&marker) {
+                markers.push(marker);
+            }
+        }
+    }
+    markers
+}
+
 /// `run:` and `uses:` lines of a GitHub Actions workflow.
 pub fn github_workflow_commands(text: &str) -> Vec<String> {
     let parsed = match serde_yaml::from_str::<YamlValue>(text) {
@@ -453,6 +619,36 @@ pub(crate) fn shell_lines(text: &str) -> Vec<String> {
 /// Where a repository of this provider declares the lane that runs the audit.
 pub fn audit_lane_anchor_path(files: &[FileInfo]) -> &'static str {
     detect(files).primary().ci_anchor_path()
+}
+
+/// A soft finding for a declared lane that resolves to no repository content.
+/// Such a lane earns nothing; reporting it keeps a typo in `command` visible.
+/// Findings built from this are `low` severity and routed at
+/// [`JERYU_DECLARATION_PATH`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedLaneFinding {
+    pub lane: String,
+    pub problem: String,
+    pub fix: String,
+    pub evidence: Vec<String>,
+}
+
+/// One [`UnresolvedLaneFinding`] per declared lane that did not resolve.
+pub fn unresolved_lane_findings(files: &[FileInfo]) -> Vec<UnresolvedLaneFinding> {
+    detect(files)
+        .unresolved_lanes
+        .into_iter()
+        .map(|lane| UnresolvedLaneFinding {
+            problem: format!("declared CI lane `{lane}` does not resolve to repository content"),
+            fix: format!(
+                "point the lane's `command` in `{JERYU_DECLARATION_PATH}` at a `just` recipe, `make` target, script path or package.json script that exists, or remove the lane; an unresolved lane earns no CI credit"
+            ),
+            evidence: vec![format!(
+                "lane `{lane}` resolved to no recipe, target, script or package.json script"
+            )],
+            lane,
+        })
+        .collect()
 }
 
 /// Where a CI-cap finding (no audit lane, no security lane, no scans) points:
@@ -696,5 +892,125 @@ mod tests {
         ];
         assert!(!is_jeryu_declaration_path("agent/ci.toml"));
         assert!(!detect(&files).has(CiProvider::Jeryu));
+    }
+
+    fn lane(command: &str) -> DeclaredLane {
+        DeclaredLane {
+            name: "required".into(),
+            command: command.into(),
+            runs: vec![],
+        }
+    }
+
+    const PACKAGE: &str = r#"{
+  "name": "widget-lint",
+  "scripts": {
+    "pretest": "tsc -p .",
+    "test": "npm run lint && vitest run",
+    "posttest": "node tools/report.mjs",
+    "lint": "eslint . && npm run lint:css",
+    "lint:css": "stylelint src",
+    "check": "run-s lint unit",
+    "unit": "vitest run --coverage",
+    "loop": "npm run loop2",
+    "loop2": "npm run loop"
+  }
+}"#;
+
+    #[test]
+    fn npm_test_resolves_through_package_scripts_and_hooks() {
+        let files = vec![
+            file("package.json", PACKAGE),
+            file("tools/report.mjs", "console.log('gitleaks report')\n"),
+        ];
+        let resolved = resolve_lane(&files, &lane("npm test")).expect("npm test resolves");
+        assert_eq!(resolved.source, "package.json");
+        for needle in [
+            "tsc -p .",
+            "vitest run",
+            "eslint .",
+            "stylelint src",
+            "gitleaks report",
+        ] {
+            assert!(
+                resolved.text.contains(needle),
+                "{needle}: {}",
+                resolved.text
+            );
+        }
+        assert_eq!(resolved.text.matches("eslint .").count(), 1);
+    }
+
+    #[test]
+    fn package_manager_lane_forms_all_resolve() {
+        let files = vec![file("package.json", PACKAGE)];
+        for command in [
+            "npm run lint",
+            "npm run-script lint",
+            "pnpm run lint",
+            "yarn lint",
+            "yarn run lint",
+        ] {
+            let resolved = resolve_lane(&files, &lane(command)).expect(command);
+            assert!(resolved.text.contains("stylelint src"), "{command}");
+            // pnpm and yarn do not run npm's pre/post hooks
+            assert!(!resolved.text.contains("tsc -p ."), "{command}");
+        }
+        let check = resolve_lane(&files, &lane("npm run check")).expect("run-s resolves");
+        assert!(check.text.contains("eslint .") && check.text.contains("--coverage"));
+    }
+
+    #[test]
+    fn package_lanes_are_bounded_and_need_a_real_script() {
+        let files = vec![file("package.json", PACKAGE)];
+        let looped = resolve_lane(&files, &lane("npm run loop")).expect("cycle terminates");
+        assert_eq!(looped.text.matches("npm run loop2").count(), 1);
+        assert!(resolve_lane(&files, &lane("npm run missing")).is_none());
+        assert!(resolve_lane(&files, &lane("yarn install")).is_none());
+        assert!(resolve_lane(&[], &lane("npm test")).is_none());
+        let no_scripts = vec![file("package.json", "{\"name\": \"x\"}")];
+        assert!(resolve_lane(&no_scripts, &lane("npm test")).is_none());
+    }
+
+    #[test]
+    fn cache_markers_need_real_cache_use() {
+        assert_eq!(
+            cache_markers_in("export RUSTC_WRAPPER=sccache\ncargo test\n"),
+            vec!["sccache", "rustc_wrapper", "ccache"]
+        );
+        assert_eq!(
+            cache_markers_in("CARGO_TARGET_DIR=target/shared cargo build\n"),
+            vec!["cargo_target_dir"]
+        );
+        assert_eq!(
+            cache_markers_in("npm ci --cache .npm --prefer-offline\n"),
+            vec!["--cache"]
+        );
+        assert_eq!(
+            cache_markers_in("docker buildx build --cache-from type=local,src=.buildx .\n"),
+            vec!["--cache-from"]
+        );
+        assert!(cache_markers_in("# warm the cache first\ncargo test\n").is_empty());
+        assert!(cache_markers_in("cargo test # sccache would help\n").is_empty());
+        assert!(
+            cache_markers_in("rm -rf cache/\ngit diff --cached\ndocker build --no-cache .\n")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn lane_cache_markers_come_only_from_resolved_lanes() {
+        let files = vec![
+            declaration(),
+            file("Justfile", "required:\n    # cache warm-up lives elsewhere\n    sccache --show-stats\n    cargo test\n\nother:\n    CARGO_TARGET_DIR=x cargo build\n"),
+        ];
+        assert_eq!(jeryu_lane_cache_markers(&files), vec!["sccache", "ccache"]);
+        let comment_only = vec![
+            declaration(),
+            file("Justfile", "required:\n    # cache\n    cargo test\n"),
+        ];
+        assert!(jeryu_lane_cache_markers(&comment_only).is_empty());
+        let undeclared = vec![file("Justfile", "required:\n    sccache cargo test\n")];
+        assert!(jeryu_lane_cache_markers(&undeclared).is_empty());
     }
 }

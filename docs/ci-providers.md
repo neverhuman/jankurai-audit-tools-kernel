@@ -2,7 +2,7 @@
 
 Status: adopted
 Owner: Jankurai maintainers
-Last reviewed: 2026-10-02
+Last reviewed: 2026-10-03
 Applies to: `crates/jankurai-audit-kernel/src/audit/ci_provider.rs`
 
 Several caps and dimensions depend on what a repository's CI really runs: the
@@ -60,7 +60,14 @@ runs = ["jankurai audit", "cargo audit", "gitleaks"]
   `make <target>` resolve to that recipe's body plus the bodies of the recipes
   it depends on (`required: fast security` runs `fast` and `security`; a
   dependency that is not a recipe adds nothing), `bash <path>` and
-  `sh <path>` to that file. The body is then followed one hop at a time into the files it
+  `sh <path>` to that file. Package-manager lanes resolve through the root
+  `package.json` `scripts`: `npm test`, `npm run <script>`,
+  `npm run-script <script>`, `pnpm run <script>`, `yarn <script>` and
+  `yarn run <script>`. A script is followed into the scripts it runs in turn
+  (`npm run x`, `pnpm x`, `yarn x`, `run-s`/`run-p` names) exactly as a recipe
+  is followed into its dependencies: only scripts that exist, bounded, each
+  visited once; an npm lane also includes the script's `pre`/`post` hooks. The
+  body is then followed one hop at a time into the files it
   calls, so a thin recipe that delegates to `bash scripts/<lane>.sh` still
   exposes the commands that script runs.
 
@@ -72,6 +79,38 @@ never a claim that earns points:
 * a lane that exists but does not run a tool earns nothing for that tool, no
   matter what `runs` claims. Unconfirmed claims are reported on the lane as
   `unverified_tools` and are never credited.
+
+A declared lane that resolves to nothing is reported as a soft (`low`)
+finding at `.jeryu/ci.toml` naming the lane, so a typo in `command` is visible
+instead of silently earning nothing. The kernel builds the finding text in
+`ci_provider::unresolved_lane_findings`; the audit pipeline adds one finding per
+entry.
+
+## Dimension bonuses that read CI
+
+Three dimension bonuses (in the analyzers crate) used to look only at
+`.github/workflows/`. They now read the resolved lane text through this module
+as well, and still never credit the declaration itself:
+
+| Dimension | Bonus | GitHub Actions | jeryu |
+| --- | --- | --- | --- |
+| Proof lanes and test routing | +8 CI presence | workflow files present | at least one declared lane resolves |
+| Build speed signals | +10 CI cache hint | workflow text mentions `cache` (unchanged) | resolved lane commands contain a marker from `ci_provider::CI_CACHE_MARKERS` (`sccache`, `RUSTC_WRAPPER`, `CARGO_TARGET_DIR`, `actions/cache`, `rust-cache`, `npm_config_cache`, `pip`/`uv`/`turbo` cache dirs, `ccache`) or a cache flag (`--cache`, `--cache-dir`, `--cache-from`, `--cache-to`, `--cache-location`) |
+| Security and supply-chain posture | +8 workflow linting | `actionlint`/`zizmor` in the command or lane text | same; with no workflow files the check is not applicable |
+
+The cache markers are matched on command lines only: comment lines and trailing
+` #` comments are ignored, and the bare word `cache` is never a marker, so
+`# warm the cache`, `rm -rf cache/`, `git diff --cached` and `--no-cache` earn
+nothing.
+
+Workflow linting (`actionlint`, `zizmor`) lints GitHub Actions workflow files,
+so it applies only when the repository has some. Without workflow files — a
+jeryu-gated repository, or one with no committed CI — the check is **not
+applicable**, following the same principle as the Data truth dimension for a
+repository with no database: it earns no points (no free bonus), and the
+"complete operational security command posture" bonus is computed from the
+checks that do apply, so the missing linter is not a hidden penalty either. A
+lint tool found in the command or lane text still earns the points.
 
 Detection is deterministic and offline. It reads only files already in the
 source inventory, never the network, so the same commit always scores the same.

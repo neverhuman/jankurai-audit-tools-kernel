@@ -311,3 +311,43 @@ fn ci_findings_path_follows_the_provider() {
         ".github/workflows"
     );
 }
+
+// A package-manager lane is CI evidence through the script it runs.
+#[test]
+fn npm_lane_earns_credit_through_its_script() {
+    let f = build(&[
+        (
+            ".jeryu/ci.toml",
+            "schema_version = \"2\"\nprovider = \"jeryu\"\n\n[[lane]]\nname = \"test\"\ncommand = \"npm test\"\n",
+        ),
+        (
+            "package.json",
+            "{\"scripts\": {\"test\": \"npm run audit && vitest run\", \"audit\": \"jankurai audit . --json target/jankurai/repo-score.json\"}}",
+        ),
+    ]);
+    let surface = ci_provider::detect(&f.ctx.all_files);
+    assert!(surface.has(ci_provider::CiProvider::Jeryu));
+    assert_eq!(surface.lanes[0].source, "package.json");
+    assert!(helpers::has_jankurai_audit_ci_lane(&f.ctx));
+}
+
+// A declared lane that does not resolve yields one soft finding naming it.
+#[test]
+fn unresolved_lane_yields_a_finding_naming_it() {
+    let f = build(&[
+        (".jeryu/ci.toml", DECLARATION),
+        ("Justfile", "fast:\n    cargo check\n"),
+    ]);
+    let findings = ci_provider::unresolved_lane_findings(&f.ctx.all_files);
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].lane, "required");
+    assert!(findings[0].problem.contains("`required`"));
+    assert!(findings[0].fix.contains(".jeryu/ci.toml"));
+
+    let resolved = build(&[
+        (".jeryu/ci.toml", DECLARATION),
+        ("Justfile", THIN_JUSTFILE),
+        ("scripts/gate.sh", FULL_GATE),
+    ]);
+    assert!(ci_provider::unresolved_lane_findings(&resolved.ctx.all_files).is_empty());
+}

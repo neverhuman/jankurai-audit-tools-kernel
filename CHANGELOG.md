@@ -8,6 +8,24 @@ version string lives in [`VERSION`](VERSION).
 
 ## [Unreleased]
 
+### Added
+
+- A jeryu lane may be a package-manager command: `npm test`,
+  `npm run <script>`, `npm run-script <script>`, `pnpm run <script>`,
+  `yarn <script>`. It resolves through the root `package.json` `scripts` and
+  follows the scripts it runs (bounded, each visited once; npm `pre`/`post`
+  hooks included). Credit still comes only from the resolved text.
+- `ci_provider::CI_CACHE_MARKERS`, `cache_markers_in` and
+  `jeryu_lane_cache_markers`: the one conservative list of markers that show a
+  resolved lane really uses a cache (sccache, `RUSTC_WRAPPER`,
+  `CARGO_TARGET_DIR`, `--cache`/`--cache-dir`/`--cache-from`, ...). Comment
+  lines and the bare word `cache` never count.
+- `ci_provider::has_github_workflows`, used by the analyzers to decide whether
+  workflow linting applies.
+- `ci_provider::unresolved_lane_findings`: one soft finding per declared lane
+  that does not resolve, routed at `.jeryu/ci.toml`. The audit pipeline in
+  jankurai-core wires it in when it re-pins this kernel.
+
 ### Removed
 
 - GitHub Actions workflows, the GitHub-only `ops/ci/aggregate.sh` /
