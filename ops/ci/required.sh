@@ -5,5 +5,8 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
 
+log "required lane: ci-local lane contract"
+bash scripts/ci-local-lanes-test.sh
+
 log "required lane: cargo metadata"
 cargo metadata --no-deps --format-version 1 --locked >/dev/null
