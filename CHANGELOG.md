@@ -8,6 +8,16 @@ version string lives in [`VERSION`](VERSION).
 
 ## [Unreleased]
 
+### Fixed
+
+- `typescript.types.any-boundary` (HLT-031) no longer reads English prose as a
+  TypeScript cast. The detector now runs on comment- and string-stripped source,
+  requires a real `as` expression (an expression token before ` as ` and a type
+  after it, never an `import`/`export` alias), and matches boundary markers as
+  identifiers, so a JSDoc line mentioning `<input ...> value as the ...` or a
+  word like `inputs` no longer fires. The suppression detector still reads raw
+  lines, since `@ts-nocheck`/`eslint-disable` live in comments.
+
 ### Added
 
 - A jeryu lane may be a package-manager command: `npm test`,

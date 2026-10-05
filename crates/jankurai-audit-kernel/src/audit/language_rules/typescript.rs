@@ -181,9 +181,11 @@ fn is_ts_config(file: &FileInfo) -> bool {
 
 fn ts_source_hard_hits(file: &FileInfo) -> Vec<LanguageFinding> {
     let mut out = Vec::new();
+    let code_only = typescript_code_lines(&file.text);
     for (idx, line) in file.text.lines().enumerate() {
         let line_no = idx + 1;
         let lower = line.to_ascii_lowercase();
+        let code_lower = code_only[idx].to_ascii_lowercase();
         if lower.contains("@ts-nocheck")
             || lower.contains("@ts-ignore")
             || lower.contains("eslint-disable")
@@ -198,7 +200,7 @@ fn ts_source_hard_hits(file: &FileInfo) -> Vec<LanguageFinding> {
                 "remove the broad suppression or scope it to a single justified line",
             ));
         }
-        if casts_at_trust_boundary(&lower) {
+        if casts_at_trust_boundary(&code_lower) {
             out.push(finding(
                 HLT_RULE_ID,
                 "typescript.types.any-boundary",
@@ -362,21 +364,100 @@ fn tsconfig_advisory_hits(file: &FileInfo) -> Vec<LanguageFinding> {
     out
 }
 
-fn casts_at_trust_boundary(lower: &str) -> bool {
-    let boundary_markers = [
-        "req.body",
-        "request.body",
-        "response.json(",
-        "fetch(",
-        "json.parse(",
-        "process.env",
-        "params",
-        "query",
-        "input",
-    ];
-    let cast_markers = [" as any", " as unknown as", " as "];
-    cast_markers.iter().any(|cast| lower.contains(cast))
-        && boundary_markers.iter().any(|marker| lower.contains(marker))
+/// Strip comments and string/template literal contents from TypeScript source so
+/// prose cannot be read as code. Returns one entry per input line, in order, with
+/// block comments (including JSDoc continuation lines) tracked across lines.
+///
+/// String literals collapse to a single `0` placeholder: the token still exists for
+/// `"text" as Foo`, but its contents can no longer match a marker.
+fn typescript_code_lines(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_block_comment = false;
+
+    for raw_line in text.lines() {
+        let mut code = String::with_capacity(raw_line.len());
+        let mut chars = raw_line.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if in_block_comment {
+                if ch == '*' && matches!(chars.peek(), Some(&'/')) {
+                    chars.next();
+                    in_block_comment = false;
+                }
+                continue;
+            }
+            if ch == '/' {
+                match chars.peek() {
+                    Some(&'/') => break,
+                    Some(&'*') => {
+                        chars.next();
+                        in_block_comment = true;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            if ch == '"' || ch == '\'' || ch == '`' {
+                let quote = ch;
+                let mut escaped = false;
+                for inner in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                        continue;
+                    }
+                    if inner == '\\' {
+                        escaped = true;
+                        continue;
+                    }
+                    if inner == quote {
+                        break;
+                    }
+                }
+                code.push('0');
+                continue;
+            }
+            code.push(ch);
+        }
+
+        out.push(code.trim().to_string());
+    }
+
+    out
+}
+
+/// A real TS `as` expression: an expression token, ` as `, then a type token.
+static AS_CAST_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"[A-Za-z0-9_$)\]]\s+as\s+(?:const\b|[A-Za-z_$(\[{])")
+        .expect("TypeScript as-cast regex is valid")
+});
+
+/// Boundary markers as identifiers, so `<input>` in JSX and a word like `inputs`
+/// in prose do not count. A leading `.` is allowed (`req.params`).
+static BOUNDARY_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?:^|[^<\w$-])(?:req\.body|request\.body|response\.json\s*\(|fetch\s*\(|json\.parse\s*\(|process\.env|params|query|input)\b",
+    )
+    .expect("TypeScript boundary marker regex is valid")
+});
+
+/// `import { x as y }`, `export * as ns from ...`: an alias, not a cast.
+fn is_import_export_alias(code_lower: &str) -> bool {
+    (code_lower.starts_with("import ")
+        || code_lower.starts_with("import{")
+        || code_lower.starts_with("export ")
+        || code_lower.starts_with("export{"))
+        && !code_lower.contains('=')
+}
+
+/// `code_lower` must be a lowercased, comment- and string-stripped source line.
+fn casts_at_trust_boundary(code_lower: &str) -> bool {
+    if code_lower.is_empty() || is_import_export_alias(code_lower) {
+        return false;
+    }
+    let cast = code_lower.contains(" as any")
+        || code_lower.contains(" as unknown as")
+        || AS_CAST_RE.is_match(code_lower);
+    cast && BOUNDARY_MARKER_RE.is_match(code_lower)
 }
 
 fn dangerous_eval_or_html(lower: &str) -> bool {
@@ -496,3 +577,108 @@ static NON_NULL_ASSERTION_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"[A-Za-z_$][A-Za-z0-9_$]*!\s*(?:\.|\[|\(|;|,|\)|\}|:|$)")
         .expect("non-null assertion regex is valid")
 });
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    fn file_info(rel_path: &str, text: &str) -> FileInfo {
+        let name = std::path::Path::new(rel_path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let suffix = std::path::Path::new(rel_path)
+            .extension()
+            .map(|ext| format!(".{}", ext.to_string_lossy()))
+            .unwrap_or_default();
+        FileInfo {
+            rel_path: rel_path.into(),
+            name,
+            suffix,
+            size: text.len() as u64,
+            line_count: text.lines().count(),
+            text: text.into(),
+            is_generated: false,
+            is_code: true,
+        }
+    }
+
+    fn any_boundary_lines(text: &str) -> Vec<usize> {
+        ts_source_hard_hits(&file_info("src/sample.ts", text))
+            .into_iter()
+            .filter(|finding| finding.matched_term == "typescript.types.any-boundary")
+            .map(|finding| finding.line.unwrap_or(0))
+            .collect()
+    }
+
+    #[test]
+    fn prose_in_a_jsdoc_comment_is_not_a_cast() {
+        let text = concat!(
+            "/**\n",
+            " * An <input type=\"datetime-local\"> value as the RFC 3339 instant the API\n",
+            " * expects. Query params are parsed as the caller asked.\n",
+            " */\n",
+            "export function toInstant(value: string): string {\n",
+            "  return value;\n",
+            "}\n",
+        );
+        assert!(any_boundary_lines(text).is_empty(), "{text}");
+    }
+
+    #[test]
+    fn line_comments_and_string_literals_are_not_casts() {
+        let text = concat!(
+            "// read the query value as the raw input string\n",
+            "const label = \"pick a value as the query input\";\n",
+            "const note = `a fetch( value as the params`;\n",
+        );
+        assert!(any_boundary_lines(text).is_empty(), "{text}");
+    }
+
+    #[test]
+    fn import_and_export_aliases_are_not_casts() {
+        let text = concat!(
+            "import { query as runQuery } from \"./db\";\n",
+            "import type { Params as QueryParams } from \"./types\";\n",
+            "export * as input from \"./input\";\n",
+        );
+        assert!(any_boundary_lines(text).is_empty(), "{text}");
+    }
+
+    #[test]
+    fn jsx_input_element_is_not_a_boundary_marker() {
+        let text = "const field = <input value={label as string} />;\n";
+        assert!(any_boundary_lines(text).is_empty(), "{text}");
+    }
+
+    #[test]
+    fn real_boundary_casts_still_fire() {
+        assert_eq!(
+            any_boundary_lines("const parsed = JSON.parse(raw) as Foo;\n"),
+            vec![1]
+        );
+        assert_eq!(
+            any_boundary_lines("const body = req.body as any;\n"),
+            vec![1]
+        );
+        assert_eq!(
+            any_boundary_lines("const id = req.params.id as unknown as UserId;\n"),
+            vec![1]
+        );
+        assert_eq!(
+            any_boundary_lines("const data = (await fetch(url)) as ApiPayload;\n"),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn suppression_detector_still_reads_comments() {
+        let hits =
+            ts_source_hard_hits(&file_info("src/sample.ts", "// eslint-disable-next-line\n"));
+        assert!(hits
+            .iter()
+            .any(|finding| finding.matched_term == "typescript.suppress.ts-nocheck"));
+    }
+}
