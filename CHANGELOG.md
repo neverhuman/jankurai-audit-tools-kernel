@@ -18,6 +18,10 @@ version string lives in [`VERSION`](VERSION).
 
 ### Fixed
 
+- `typescript.types.any-boundary` (HLT-031) again fires on an empty boundary
+  call such as `response.json() as any` or `(await fetch()) as T`. The
+  identifier-boundary check added below also applied to the call markers, so a
+  `(` followed by `)` never matched; call markers now end at their `(`.
 - `typescript.types.any-boundary` (HLT-031) no longer reads English prose as a
   TypeScript cast. The detector now runs on comment- and string-stripped source,
   requires a real `as` expression (an expression token before ` as ` and a type

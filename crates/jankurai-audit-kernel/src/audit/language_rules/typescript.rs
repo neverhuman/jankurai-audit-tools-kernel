@@ -432,10 +432,12 @@ static AS_CAST_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// Boundary markers as identifiers, so `<input>` in JSX and a word like `inputs`
-/// in prose do not count. A leading `.` is allowed (`req.params`).
+/// in prose do not count. A leading `.` is allowed (`req.params`). Identifier
+/// markers end at a word boundary; call markers end at their `(`, so an empty
+/// call such as `response.json()` still counts.
 static BOUNDARY_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?:^|[^<\w$-])(?:req\.body|request\.body|response\.json\s*\(|fetch\s*\(|json\.parse\s*\(|process\.env|params|query|input)\b",
+        r"(?:^|[^<\w$-])(?:(?:req\.body|request\.body|process\.env|params|query|input)\b|(?:response\.json|fetch|json\.parse)\s*\()",
     )
     .expect("TypeScript boundary marker regex is valid")
 });
@@ -669,6 +671,22 @@ mod tests {
         );
         assert_eq!(
             any_boundary_lines("const data = (await fetch(url)) as ApiPayload;\n"),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn empty_boundary_calls_still_fire() {
+        assert_eq!(
+            any_boundary_lines("const value = response.json() as any;\n"),
+            vec![1]
+        );
+        assert_eq!(
+            any_boundary_lines("const data = (await fetch()) as ApiPayload;\n"),
+            vec![1]
+        );
+        assert_eq!(
+            any_boundary_lines("const parsed = JSON.parse(\"{}\") as Foo;\n"),
             vec![1]
         );
     }
