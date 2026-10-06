@@ -8,6 +8,14 @@ version string lives in [`VERSION`](VERSION).
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-10-06
+
+### Changed
+
+- Public auditor identity is `1.7.3`. Standard `0.9.0` and schema `1.9.0` are
+  unchanged. A stored scan whose `last_full_auditor_version` differs from this
+  identity runs a full scan.
+
 ### Fixed
 
 - `typescript.types.any-boundary` (HLT-031) no longer reads English prose as a
