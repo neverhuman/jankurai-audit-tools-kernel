@@ -890,19 +890,9 @@ pub fn false_green_hits(ctx: &AuditContext) -> Vec<FindingHit> {
 pub fn authz_isolation_hits(ctx: &AuditContext) -> Vec<FindingHit> {
     let product = product_code_files(ctx);
     let authz_surface = product.iter().find_map(|file| {
-        file.text.lines().enumerate().find_map(|(idx, line)| {
-            let lower = line.to_ascii_lowercase();
-            AUTHZ_ISOLATION_PATTERNS
-                .iter()
-                .find(|pattern| lower.contains(**pattern))
-                .map(|pattern| {
-                    (
-                        file,
-                        idx + 1,
-                        line.trim().to_string(),
-                        (*pattern).to_string(),
-                    )
-                })
+        super::authz_terms::first_surface_line(&file.text).map(|(line, term)| {
+            let text = file.text.lines().nth(line - 1).unwrap_or_default();
+            (file, line, text.trim().to_string(), term.to_string())
         })
     });
     let Some((file, line, text, matched_term)) = authz_surface else {
@@ -3302,6 +3292,71 @@ fn finding_count(row: &Value) -> Result<u64> {
             "nearby allow comment should suppress input_boundary_hits, got {} hits",
             hits.len()
         );
+    }
+
+    #[test]
+    fn authz_isolation_ignores_rls_inside_url_identifiers() {
+        // Shapes from a CDP bridge: `rls` inside `urls`/`UrlSetting`, and an IRLS acronym.
+        let text = "const checked_cdp_urls = [];\nconst cdpUrlSetting = readSetting('cdpUrl');\nfor (const u of URLs) {}\nconst IRLS = 4;\n";
+        let ctx = make_ctx(vec![product_file(
+            "apps/chrome-bridge/bin/cdp-recovery-smoke.mjs",
+            text,
+        )]);
+        assert!(authz_isolation_hits(&ctx).is_empty());
+    }
+
+    #[test]
+    fn authz_isolation_still_flags_real_surfaces_without_negative_proof() {
+        for (path, text, term) in [
+            (
+                "apps/api/sql/0001_policy.sql",
+                "CREATE POLICY notes_owner ON notes\n  USING (owner = current_user);\n",
+                "create policy",
+            ),
+            (
+                "apps/api/sql/0002_enable.sql",
+                "ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n",
+                "row level security",
+            ),
+            (
+                "apps/api/src/notes.ts",
+                "return db.notes.where({ tenantId: session.tenantId });\n",
+                "tenant_id",
+            ),
+            (
+                "apps/api/src/notes.rs",
+                "let rows = query(\"select * from notes where tenant_id = $1\");\n",
+                "tenant_id",
+            ),
+            (
+                "apps/web/src/nav.ts",
+                "if (user.isAdmin) { show(); }\n",
+                "admin",
+            ),
+        ] {
+            let hits = authz_isolation_hits(&make_ctx(vec![product_file(path, text)]));
+            assert_eq!(hits.len(), 1, "{path} should be an authz surface");
+            assert_eq!(hits[0].matched_term.as_deref(), Some(term), "{path}");
+        }
+    }
+
+    #[test]
+    fn authz_isolation_negative_test_clears_the_finding() {
+        let ctx = make_ctx(vec![
+            product_file("apps/web/src/nav.ts", "if (user.isAdmin) { show(); }\n"),
+            product_file(
+                "apps/web/tests/nav.test.ts",
+                "it('hides admin nav from the wrong user', () => {});\n",
+            ),
+        ]);
+        assert!(authz_isolation_hits(&ctx).is_empty());
+    }
+
+    #[test]
+    fn nearby_allow_suppresses_authz_isolation_hit() {
+        let text = "// jankurai:allow HLT-022-AUTHZ-ISOLATION-GAP reason=display label only expires=2099-12-31\nconst adminLabel = 'Admin';\n";
+        let ctx = make_ctx(vec![product_file("apps/web/src/labels.ts", text)]);
+        assert!(authz_isolation_hits(&ctx).is_empty());
     }
 
     #[test]

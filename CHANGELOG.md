@@ -18,6 +18,19 @@ version string lives in [`VERSION`](VERSION).
 
 ### Fixed
 
+- `HLT-022-AUTHZ-ISOLATION-GAP` matches its surface terms (`owner_id`,
+  `tenant_id`, `organization_id`, `org_id`, `rls`, `row level security`,
+  `admin`) as whole identifier tokens, not substrings, so `rls` no longer fires
+  inside `urls`, `checked_cdp_urls`, `cdpUrlSetting` or `URLs`. Lines are split
+  on non-alphanumerics and at camelCase, digit and acronym-to-word boundaries.
+  Multi-word terms match consecutive tokens (`tenantId`, `OWNER-ID`,
+  `ROW LEVEL SECURITY`), a term also matches its plural, and `admin` also
+  matches `administrator` and `superadmin`. An all-caps run is one token: `RLS`
+  matches, but the acronym `IRLS` does not. A SQL `CREATE POLICY` with a
+  `USING (`/`WITH CHECK (` clause within three lines is now reported too. A
+  `jankurai:allow HLT-022-AUTHZ-ISOLATION-GAP reason=… expires=…` comment within
+  two lines skips that line, as for HLT-023. The negative-proof check on test
+  files is unchanged.
 - `typescript.types.any-boundary` (HLT-031) again fires on an empty boundary
   call such as `response.json() as any` or `(await fetch()) as T`. The
   identifier-boundary check added below also applied to the call markers, so a

@@ -1,3 +1,4 @@
+pub mod authz_terms;
 pub mod ci_provider;
 pub mod copy_code;
 pub mod evidence;
