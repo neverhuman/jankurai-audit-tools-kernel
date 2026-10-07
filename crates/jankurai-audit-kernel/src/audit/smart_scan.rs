@@ -1,6 +1,7 @@
 //! Smart scan mode: after a clean full scan, scope subsequent audits to only
 //! the files reported by `git status`. Full scans are forced by a timer, a
-//! roulette check, HEAD-drift detection, or explicit `--full`.
+//! roulette check, HEAD-drift detection, a new UTC day (allow comments expire
+//! by date), or explicit `--full`.
 //!
 //! The decision is purely advisory to the caller — it returns a
 //! [`SmartScanDecision`] and the caller decides how to proceed.
@@ -100,6 +101,13 @@ pub fn decide(root: &Path, config: &SmartScanConfig) -> Result<SmartScanDecision
     if state.last_full_auditor_version != crate::model::AUDITOR_VERSION {
         return Ok(SmartScanDecision::Full {
             reason: "auditor version changed",
+        });
+    }
+    if !same_utc_day(state.last_full_scan_at, now_unix_secs()) {
+        // A `jankurai:allow` comment expires at a UTC date boundary, so a clean
+        // result is not carried across one.
+        return Ok(SmartScanDecision::Full {
+            reason: "UTC date changed since last full scan",
         });
     }
     if config.interval_secs > 0 && elapsed_since(state.last_full_scan_at) > config.interval_secs {
@@ -212,6 +220,11 @@ fn now_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// True when two Unix timestamps fall on the same UTC calendar day.
+fn same_utc_day(a: i64, b: i64) -> bool {
+    a.div_euclid(86_400) == b.div_euclid(86_400)
+}
+
 fn elapsed_since(then: i64) -> u64 {
     let now = now_unix_secs();
     if now > then {
@@ -241,6 +254,14 @@ fn roulette(rate: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_utc_day_splits_at_midnight_utc() {
+        let midnight = 1_791_331_200; // 2026-10-07T00:00:00Z
+        assert!(same_utc_day(midnight, midnight + 86_399));
+        assert!(!same_utc_day(midnight - 1, midnight));
+        assert!(!same_utc_day(midnight, midnight + 86_400));
+    }
 
     #[test]
     fn roulette_rate_zero_never_fires() {

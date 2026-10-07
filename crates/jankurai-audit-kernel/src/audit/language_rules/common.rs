@@ -97,11 +97,15 @@ fn nearby_lines(text: &str, line: usize, radius: usize) -> Vec<&str> {
     lines[start..end].to_vec()
 }
 
+/// The UTC date this process audits against, read from the clock once so a
+/// run that crosses midnight judges every allow comment by the same date.
+pub static AUDIT_DATE: Lazy<NaiveDate> = Lazy::new(|| Utc::now().date_naive());
+
 /// True when a `jankurai:allow <detector> reason=… expires=YYYY-MM-DD` comment
-/// within two lines of `line` is still in force today (UTC). See
+/// within two lines of `line` is still in force on [`AUDIT_DATE`]. See
 /// [`nearby_allow_on`].
 pub fn nearby_allow(text: &str, line: usize, detector_id: &str) -> bool {
-    nearby_allow_on(text, line, detector_id, Utc::now().date_naive())
+    nearby_allow_on(text, line, detector_id, *AUDIT_DATE)
 }
 
 /// [`nearby_allow`] against an explicit `today`.

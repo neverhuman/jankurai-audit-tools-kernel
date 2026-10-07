@@ -8,7 +8,7 @@ version string lives in [`VERSION`](VERSION).
 
 ## [Unreleased]
 
-## [1.7.3] - 2026-10-06
+## [1.7.3] - 2026-10-07
 
 ### Changed
 
@@ -25,7 +25,8 @@ version string lives in [`VERSION`](VERSION).
   Lines are split on non-alphanumerics and at camelCase, digit and
   acronym-to-word boundaries. Multi-word terms match consecutive tokens
   (`tenantId`, `OWNER-ID`, `ROW LEVEL SECURITY`), a term also matches its
-  plural, and `admin` also matches `administrator` and `superadmin`. An all-caps
+  plural, and `admin` also matches `administrator` and any token ending in
+  `admin` (`superadmin`, `sysadmin`, `webadmin`, `orgAdmin`). An all-caps
   run is one token: `RLS` matches, but the acronym `IRLS` does not.
 - The negative proof that clears `HLT-022-AUTHZ-ISOLATION-GAP` uses the same
   token matching. A test file counts only when one line holds `wrong user`,
@@ -39,7 +40,11 @@ version string lives in [`VERSION`](VERSION).
   suppresses anything. Before, the date was checked for shape only, so a past
   date suppressed forever. This applies to every detector that reads the
   shared allow comment (HLT-010, HLT-023, HLT-031, comment hygiene, and the
-  analyzers' web-security and repo-rot detectors).
+  analyzers' web-security and repo-rot detectors). The date is the UTC date
+  the audit process starts, read once per run, so the same commit can gain a
+  finding on a later day once an allow expires. Smart scan runs a full scan
+  when the UTC date has changed since the last full scan, so a clean result is
+  not carried past an expiry.
 - `typescript.types.any-boundary` (HLT-031) again fires on an empty boundary
   call such as `response.json() as any` or `(await fetch()) as T`. The
   identifier-boundary check added below also applied to the call markers, so a
@@ -54,8 +59,10 @@ version string lives in [`VERSION`](VERSION).
 
 ### Added
 
-- `HLT-022-AUTHZ-ISOLATION-GAP` reports a SQL `CREATE POLICY` with a
-  `USING (`/`WITH CHECK (` clause within three lines as a surface. Like every
+- `HLT-022-AUTHZ-ISOLATION-GAP` reports a SQL `CREATE POLICY <name> ON`
+  statement as a surface when its `USING (`/`WITH CHECK (` clause follows on
+  the same line or within the next three. The keywords must be separate words,
+  so a `createPolicy(` call is not one. Like every
   HLT-022 term it is read only from product code, which excludes files under
   top-level `db/`, `migrations/`, `contracts/` and `ops/`, so it fires for SQL
   kept under application paths, not for top-level migration folders.

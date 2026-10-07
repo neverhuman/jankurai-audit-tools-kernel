@@ -24,10 +24,13 @@
 //! (`owner_ids`, `admins`). Multi-word terms match consecutive tokens, so
 //! `owner_id`, `ownerId`, `OWNER-ID` and `record.owner_id` all match
 //! `owner_id`, and `ROW LEVEL SECURITY` matches `row level security`.
-//! `admin` also matches `administrator` and `superadmin`.
+//! `admin` also matches `administrator` and any token ending in `admin`
+//! (`superadmin`, `sysadmin`, `webadmin`); `badminton` and `adminer` do not.
 //!
-//! A SQL `CREATE POLICY` statement whose `USING (` or `WITH CHECK (` clause is
-//! on the same line or the next three lines is reported as `create policy`.
+//! A SQL `CREATE POLICY <name> ON` statement, written as separate keywords,
+//! whose `USING (` or `WITH CHECK (` clause follows on the same line or the
+//! next three lines is reported as `create policy`. `createPolicy(` and prose
+//! such as "create policy docs" are not.
 //!
 //! The negative proof that clears the finding uses the same tokens. A test
 //! file clears it only when one of its lines contains a phrase from
@@ -42,8 +45,9 @@ use super::scan::AUTHZ_ISOLATION_PATTERNS;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// Extra whole-token spellings of the `admin` term.
-const ADMIN_ALIASES: &[&str] = &["administrator", "superadmin"];
+/// Extra whole-token spellings of the `admin` term. A token that ends in
+/// `admin` (`sysadmin`, `webadmin`, `orgadmin`) also matches.
+const ADMIN_ALIASES: &[&str] = &["administrator"];
 
 /// The label reported for a matched SQL row-security policy.
 pub const CREATE_POLICY_TERM: &str = "create policy";
@@ -75,8 +79,12 @@ static SURFACE_TERMS: Lazy<TokenizedTerms> = Lazy::new(|| tokenize_terms(AUTHZ_I
 static NEGATIVE_PROOF_TERMS: Lazy<TokenizedTerms> =
     Lazy::new(|| tokenize_terms(NEGATIVE_PROOF_PHRASES));
 
-static CREATE_POLICY_TOKENS: Lazy<[String; 2]> =
-    Lazy::new(|| ["create".to_string(), "policy".to_string()]);
+/// `CREATE POLICY <name> ON`, the opening of a SQL row-security policy, as
+/// whitespace-separated keywords (so `createPolicy(` is not one).
+static CREATE_POLICY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)\bcreate\s+policy\s+("[^"]+"|[a-z_][a-z0-9_$.]*)\s+on\s"#)
+        .expect("valid create policy regex")
+});
 
 static POLICY_CLAUSE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\b(using|with\s+check)\s*\(").expect("valid policy clause regex")
@@ -126,12 +134,14 @@ fn split_word(word: &str, out: &mut Vec<String>) {
 }
 
 fn token_matches(term: &str, token: &str) -> bool {
+    let singular = token.strip_suffix('s').unwrap_or(token);
     token == term
-        || token.strip_suffix('s') == Some(term)
+        || singular == term
         || (term == "admin"
-            && ADMIN_ALIASES
-                .iter()
-                .any(|alias| token == *alias || token.strip_suffix('s') == Some(*alias)))
+            && (singular.ends_with("admin")
+                || ADMIN_ALIASES
+                    .iter()
+                    .any(|alias| token == *alias || singular == *alias)))
 }
 
 fn contains_term(tokens: &[String], term: &[String]) -> bool {
@@ -156,11 +166,13 @@ pub fn matched_term(line: &str) -> Option<&'static str> {
     first_term(&identifier_tokens(line), &SURFACE_TERMS)
 }
 
-fn is_create_policy(tokens: &[String], lines: &[&str], idx: usize) -> bool {
-    tokens
-        .windows(2)
-        .any(|w| w == CREATE_POLICY_TOKENS.as_slice())
-        && lines[idx..(idx + 4).min(lines.len())]
+fn is_create_policy(lines: &[&str], idx: usize) -> bool {
+    let line = format!("{} ", lines[idx]);
+    let Some(open) = CREATE_POLICY_RE.find(&line) else {
+        return false;
+    };
+    POLICY_CLAUSE_RE.is_match(&line[open.end()..])
+        || lines[idx + 1..(idx + 4).min(lines.len())]
             .iter()
             .any(|line| POLICY_CLAUSE_RE.is_match(line))
 }
@@ -171,7 +183,7 @@ pub fn first_surface_line(text: &str) -> Option<(usize, &'static str)> {
     (0..lines.len()).find_map(|idx| {
         let tokens = identifier_tokens(lines[idx]);
         let term = first_term(&tokens, &SURFACE_TERMS)
-            .or_else(|| is_create_policy(&tokens, &lines, idx).then_some(CREATE_POLICY_TERM))?;
+            .or_else(|| is_create_policy(&lines, idx).then_some(CREATE_POLICY_TERM))?;
         Some((idx + 1, term))
     })
 }
@@ -227,6 +239,21 @@ mod tests {
             Some(CREATE_POLICY_TERM)
         );
         assert_eq!(term("// TODO: create policy docs"), None);
+        assert_eq!(
+            term("CREATE POLICY \"notes owner\" ON public.notes USING (true);"),
+            Some(CREATE_POLICY_TERM)
+        );
+    }
+
+    #[test]
+    fn create_policy_needs_sql_keywords_and_a_following_clause() {
+        // A `createPolicy(` call followed by an unrelated `using(` is not SQL.
+        let ts = "const p = createPolicy(name);\nconst s = using(theme);\n";
+        assert_eq!(first_surface_line(ts), None);
+        // The clause must follow the statement, not precede it.
+        let before = "x.using(y);\nCREATE POLICY p ON t;\n";
+        assert_eq!(first_surface_line(before), None);
+        assert_eq!(term("we create policy docs for users, using (forms)"), None);
     }
 
     #[test]
@@ -261,6 +288,10 @@ mod tests {
         assert_eq!(term("const ADMINS = load();"), Some("admin"));
         assert_eq!(term("if is_administrator(user) {"), Some("admin"));
         assert_eq!(term("role === 'superadmin'"), Some("admin"));
+        assert_eq!(term("if user.is_sysadmin() {"), Some("admin"));
+        assert_eq!(term("const webadmins = [];"), Some("admin"));
+        assert_eq!(term("orgAdmin.grant(role)"), Some("admin"));
+        assert_eq!(term("let tenantadmin = load();"), Some("admin"));
         assert_eq!(term("const badminton = 1;"), None);
         assert_eq!(term("adminer_port = 8080"), None);
     }
