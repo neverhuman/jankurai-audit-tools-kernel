@@ -27,24 +27,29 @@ version string lives in [`VERSION`](VERSION).
   (`tenantId`, `OWNER-ID`, `ROW LEVEL SECURITY`), a term also matches its
   plural, and `admin` also matches `administrator` and any token ending in
   `admin` (`superadmin`, `sysadmin`, `webadmin`, `orgAdmin`). An all-caps
-  run is one token: `RLS` matches, but the acronym `IRLS` does not.
+  run is one token: `RLS` matches, but the acronym `IRLS` does not. Token
+  matching drops a few substring hits: `tenant_identifier` and
+  `owner_identity` no longer match `tenant_id`/`owner_id`, `administration` no
+  longer matches `admin`, and a glued `enablerls` no longer matches `rls`
+  (matching every token ending in `rls` would bring back `urls`).
 - The negative proof that clears `HLT-022-AUTHZ-ISOLATION-GAP` uses the same
   token matching. A test file counts only when one line holds `wrong user`,
   `other user`, `non owner` (also `non-owner`, `nonOwner`), `forbidden`,
   `tenant isolation` or `rls` as consecutive identifier tokens, so `urls` or
   `cdpUrls` in a test no longer clears a real finding, and neither does
-  `another user` or a phrase split across two lines.
+  `another user` or a phrase split across two lines. Like the surface terms,
+  the phrases match across naming styles, so `wrongUser` and `nonOwner` count.
+  Proof is still searched repo-wide, as before.
 - A `jankurai:allow … expires=YYYY-MM-DD` comment now suppresses a finding only
   while its expiry date is today (UTC) or later. An expired, missing or
   malformed expiry (`expires=never`, `expires=2026-02-30`) no longer
   suppresses anything. Before, the date was checked for shape only, so a past
   date suppressed forever. This applies to every detector that reads the
   shared allow comment (HLT-010, HLT-023, HLT-031, comment hygiene, and the
-  analyzers' web-security and repo-rot detectors). The date is the UTC date
-  the audit process starts, read once per run, so the same commit can gain a
-  finding on a later day once an allow expires. Smart scan runs a full scan
-  when the UTC date has changed since the last full scan, so a clean result is
-  not carried past an expiry.
+  analyzers' web-security and repo-rot detectors). The date is the current
+  UTC date, so the same commit can gain a finding on a later day once an allow
+  expires. Smart scan runs a full scan when the last full scan was on an
+  earlier UTC day, so a clean result is not carried past an expiry.
 - `typescript.types.any-boundary` (HLT-031) again fires on an empty boundary
   call such as `response.json() as any` or `(await fetch()) as T`. The
   identifier-boundary check added below also applied to the call markers, so a
@@ -62,10 +67,14 @@ version string lives in [`VERSION`](VERSION).
 - `HLT-022-AUTHZ-ISOLATION-GAP` reports a SQL `CREATE POLICY <name> ON`
   statement as a surface when its `USING (`/`WITH CHECK (` clause follows on
   the same line or within the next three. The keywords must be separate words,
-  so a `createPolicy(` call is not one. Like every
-  HLT-022 term it is read only from product code, which excludes files under
-  top-level `db/`, `migrations/`, `contracts/` and `ops/`, so it fires for SQL
-  kept under application paths, not for top-level migration folders.
+  so a `createPolicy(` call is not one. Standalone `.sql` product files, which
+  are not code files, are now read for row-security statements only:
+  `CREATE POLICY` and `ROW LEVEL SECURITY` (as in `ENABLE ROW LEVEL SECURITY`),
+  ignoring `--` comments. Like every HLT-022 surface these come from product
+  files, which exclude top-level `db/`, `migrations/`, `contracts/` and `ops/`,
+  so SQL under application paths counts and top-level migration folders do
+  not.
+
 - A jeryu lane may be a package-manager command: `npm test`,
   `npm run <script>`, `npm run-script <script>`, `pnpm run <script>`,
   `yarn <script>`. It resolves through the root `package.json` `scripts` and

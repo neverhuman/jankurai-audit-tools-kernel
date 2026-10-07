@@ -888,9 +888,17 @@ pub fn false_green_hits(ctx: &AuditContext) -> Vec<FindingHit> {
 }
 
 pub fn authz_isolation_hits(ctx: &AuditContext) -> Vec<FindingHit> {
-    let product = product_code_files(ctx);
+    let product = product_files(ctx);
     let authz_surface = product.iter().find_map(|file| {
-        super::authz_terms::first_surface_line(&file.text).map(|(line, term)| {
+        let surface = if file.is_code {
+            super::authz_terms::first_surface_line(&file.text)
+        } else if file.suffix == ".sql" {
+            // `.sql` is not a code extension; read it for row-security statements.
+            super::authz_terms::first_sql_surface_line(&file.text)
+        } else {
+            None
+        };
+        surface.map(|(line, term)| {
             let text = file.text.lines().nth(line - 1).unwrap_or_default();
             (file, line, text.trim().to_string(), term.to_string())
         })
@@ -2866,23 +2874,27 @@ fn finding_count(row: &Value) -> Result<u64> {
         assert!(hits.iter().any(|hit| hit.path.ends_with("paper.rs")));
     }
 
+    /// A product file whose `is_code` comes from the real classifier, so a test
+    /// cannot assert behaviour on a file kind the audit never scans as code.
     fn product_file(rel_path: &str, text: &str) -> FileInfo {
+        let name = std::path::PathBuf::from(rel_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let suffix = std::path::PathBuf::from(rel_path)
+            .extension()
+            .map(|ext| format!(".{}", ext.to_string_lossy()))
+            .unwrap_or_default();
         FileInfo {
             rel_path: rel_path.into(),
-            name: std::path::PathBuf::from(rel_path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-            suffix: std::path::PathBuf::from(rel_path)
-                .extension()
-                .map(|ext| format!(".{}", ext.to_string_lossy()))
-                .unwrap_or_default(),
             size: text.len() as u64,
             line_count: text.lines().count(),
             text: text.into(),
             is_generated: false,
-            is_code: true,
+            is_code: super::super::file_kinds::is_code_file(&name, &suffix),
+            name,
+            suffix,
         }
     }
 
@@ -3331,6 +3343,29 @@ fn finding_count(row: &Value) -> Result<u64> {
             assert_eq!(hits.len(), 1, "{path} should be an authz surface");
             assert_eq!(hits[0].matched_term.as_deref(), Some(term), "{path}");
         }
+    }
+
+    #[test]
+    fn authz_isolation_reads_sql_files_only_for_row_security() {
+        // A `.sql` file is not a code file; its row-security DDL is still a surface.
+        let sql = product_file(
+            "apps/api/sql/0003_policy.sql",
+            "CREATE POLICY p ON notes\n  WITH CHECK (owner_id = current_user);\n",
+        );
+        assert!(!sql.is_code);
+        let hits = authz_isolation_hits(&make_ctx(vec![sql]));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].matched_term.as_deref(), Some("create policy"));
+        // A plain column in SQL, or the same text in Markdown, is not.
+        let column = product_file(
+            "apps/api/sql/0004_table.sql",
+            "CREATE TABLE t (tenant_id uuid);\n",
+        );
+        let docs = product_file(
+            "apps/api/NOTES.md",
+            "ALTER TABLE t ENABLE ROW LEVEL SECURITY;\n",
+        );
+        assert!(authz_isolation_hits(&make_ctx(vec![column, docs])).is_empty());
     }
 
     #[test]

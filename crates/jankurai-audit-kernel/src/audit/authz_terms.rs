@@ -38,6 +38,14 @@
 //! `cdpUrls` in a test is not `rls` proof and `another user` is not
 //! `other user`.
 //!
+//! Standalone `.sql` files are not code files, so they are read only for
+//! row-security statements: `CREATE POLICY` (above) and `ROW LEVEL SECURITY`.
+//!
+//! Token matching trades a few substring hits for precision: `tenant_identifier`
+//! and `owner_identity` no longer match `tenant_id`/`owner_id`, `administration`
+//! no longer matches `admin`, and a glued `enablerls` no longer matches `rls`
+//! (matching every token that ends in `rls` would bring back `urls`).
+//!
 //! There is no comment-based opt-out for this rule: an authorization or
 //! data-isolation surface is cleared only by negative proof.
 
@@ -78,6 +86,12 @@ static SURFACE_TERMS: Lazy<TokenizedTerms> = Lazy::new(|| tokenize_terms(AUTHZ_I
 
 static NEGATIVE_PROOF_TERMS: Lazy<TokenizedTerms> =
     Lazy::new(|| tokenize_terms(NEGATIVE_PROOF_PHRASES));
+
+/// The `row level security` surface term, as reported.
+const ROW_LEVEL_SECURITY_TERM: &str = "row level security";
+
+static ROW_LEVEL_SECURITY_TOKENS: Lazy<Vec<String>> =
+    Lazy::new(|| identifier_tokens(ROW_LEVEL_SECURITY_TERM));
 
 /// `CREATE POLICY <name> ON`, the opening of a SQL row-security policy, as
 /// whitespace-separated keywords (so `createPolicy(` is not one).
@@ -188,6 +202,25 @@ pub fn first_surface_line(text: &str) -> Option<(usize, &'static str)> {
     })
 }
 
+/// The first row-security statement in a `.sql` file: `CREATE POLICY <name> ON`
+/// with its clause (see [`first_surface_line`]) or `ROW LEVEL SECURITY` (as in
+/// `ALTER TABLE t ENABLE ROW LEVEL SECURITY`). Text after `--` is a comment and
+/// is ignored. Other HLT-022 terms, such as an `owner_id` column, are not read
+/// from `.sql` files.
+pub fn first_sql_surface_line(text: &str) -> Option<(usize, &'static str)> {
+    let code: Vec<&str> = text
+        .lines()
+        .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+        .collect();
+    (0..code.len()).find_map(|idx| {
+        if is_create_policy(&code, idx) {
+            return Some((idx + 1, CREATE_POLICY_TERM));
+        }
+        contains_term(&identifier_tokens(code[idx]), &ROW_LEVEL_SECURITY_TOKENS)
+            .then_some((idx + 1, ROW_LEVEL_SECURITY_TERM))
+    })
+}
+
 /// The first negative-proof phrase in `text`, matched as identifier tokens on
 /// a single line, in `NEGATIVE_PROOF_PHRASES` order.
 pub fn negative_proof_phrase(text: &str) -> Option<&'static str> {
@@ -243,6 +276,24 @@ mod tests {
             term("CREATE POLICY \"notes owner\" ON public.notes USING (true);"),
             Some(CREATE_POLICY_TERM)
         );
+    }
+
+    #[test]
+    fn sql_files_report_only_row_security_statements() {
+        let policy = "-- owner can read\nCREATE POLICY notes_owner ON notes\n  USING (owner_id = current_user);\n";
+        assert_eq!(
+            first_sql_surface_line(policy),
+            Some((2, CREATE_POLICY_TERM))
+        );
+        let enable =
+            "CREATE TABLE notes (owner_id uuid);\nALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n";
+        assert_eq!(
+            first_sql_surface_line(enable),
+            Some((2, "row level security"))
+        );
+        // A column name alone is not a row-security statement, and comments do not count.
+        let plain = "CREATE TABLE notes (owner_id uuid, tenant_id uuid);\n-- TODO: enable row level security\n";
+        assert_eq!(first_sql_surface_line(plain), None);
     }
 
     #[test]
