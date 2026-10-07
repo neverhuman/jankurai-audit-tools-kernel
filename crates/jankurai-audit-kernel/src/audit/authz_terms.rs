@@ -29,21 +29,54 @@
 //! A SQL `CREATE POLICY` statement whose `USING (` or `WITH CHECK (` clause is
 //! on the same line or the next three lines is reported as `create policy`.
 //!
-//! A line within two lines of a `jankurai:allow HLT-022-AUTHZ-ISOLATION-GAP`
-//! comment with `reason=` and `expires=` is skipped, as for HLT-023.
+//! The negative proof that clears the finding uses the same tokens. A test
+//! file clears it only when one of its lines contains a phrase from
+//! [`NEGATIVE_PROOF_PHRASES`] as consecutive identifier tokens, so `urls` or
+//! `cdpUrls` in a test is not `rls` proof and `another user` is not
+//! `other user`.
+//!
+//! There is no comment-based opt-out for this rule: an authorization or
+//! data-isolation surface is cleared only by negative proof.
 
-use super::language_rules::common::nearby_allow;
 use super::scan::AUTHZ_ISOLATION_PATTERNS;
 use once_cell::sync::Lazy;
 use regex::Regex;
-
-const AUTHZ_RULE_ID: &str = "HLT-022-AUTHZ-ISOLATION-GAP";
 
 /// Extra whole-token spellings of the `admin` term.
 const ADMIN_ALIASES: &[&str] = &["administrator", "superadmin"];
 
 /// The label reported for a matched SQL row-security policy.
 pub const CREATE_POLICY_TERM: &str = "create policy";
+
+/// Phrases a test file must contain, as identifier tokens on one line, to count
+/// as negative proof for an authz/isolation surface. `non owner` also covers
+/// `non-owner`, `owner/non-owner` and `nonOwner`.
+pub const NEGATIVE_PROOF_PHRASES: &[&str] = &[
+    "wrong user",
+    "other user",
+    "non owner",
+    "forbidden",
+    "tenant isolation",
+    "rls",
+];
+
+/// A phrase together with its identifier tokens, tokenized once.
+type TokenizedTerms = Vec<(&'static str, Vec<String>)>;
+
+fn tokenize_terms(terms: &[&'static str]) -> TokenizedTerms {
+    terms
+        .iter()
+        .map(|term| (*term, identifier_tokens(term)))
+        .collect()
+}
+
+static SURFACE_TERMS: Lazy<TokenizedTerms> = Lazy::new(|| tokenize_terms(AUTHZ_ISOLATION_PATTERNS));
+
+static NEGATIVE_PROOF_TERMS: Lazy<TokenizedTerms> =
+    Lazy::new(|| tokenize_terms(NEGATIVE_PROOF_PHRASES));
+
+static CREATE_POLICY_TOKENS: Lazy<[String; 2]> =
+    Lazy::new(|| ["create".to_string(), "policy".to_string()]);
 
 static POLICY_CLAUSE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\b(using|with\s+check)\s*\(").expect("valid policy clause regex")
@@ -111,32 +144,43 @@ fn contains_term(tokens: &[String], term: &[String]) -> bool {
         })
 }
 
-/// The first authz/isolation term on `line`, in `AUTHZ_ISOLATION_PATTERNS` order.
-pub fn matched_term(line: &str) -> Option<&'static str> {
-    let tokens = identifier_tokens(line);
-    AUTHZ_ISOLATION_PATTERNS
+fn first_term(tokens: &[String], terms: &TokenizedTerms) -> Option<&'static str> {
+    terms
         .iter()
-        .copied()
-        .find(|pattern| contains_term(&tokens, &identifier_tokens(pattern)))
+        .find(|(_, term)| contains_term(tokens, term))
+        .map(|(label, _)| *label)
 }
 
-fn is_create_policy(lines: &[&str], idx: usize) -> bool {
-    let tokens = identifier_tokens(lines[idx]);
-    let create_policy = ["create".to_string(), "policy".to_string()];
-    tokens.windows(2).any(|w| w == create_policy)
+/// The first authz/isolation term on `line`, in `AUTHZ_ISOLATION_PATTERNS` order.
+pub fn matched_term(line: &str) -> Option<&'static str> {
+    first_term(&identifier_tokens(line), &SURFACE_TERMS)
+}
+
+fn is_create_policy(tokens: &[String], lines: &[&str], idx: usize) -> bool {
+    tokens
+        .windows(2)
+        .any(|w| w == CREATE_POLICY_TOKENS.as_slice())
         && lines[idx..(idx + 4).min(lines.len())]
             .iter()
             .any(|line| POLICY_CLAUSE_RE.is_match(line))
 }
 
-/// The first non-allowed surface line in `text`: its 1-based line number and term.
+/// The first surface line in `text`: its 1-based line number and term.
 pub fn first_surface_line(text: &str) -> Option<(usize, &'static str)> {
     let lines: Vec<&str> = text.lines().collect();
     (0..lines.len()).find_map(|idx| {
-        let term = matched_term(lines[idx])
-            .or_else(|| is_create_policy(&lines, idx).then_some(CREATE_POLICY_TERM))?;
-        (!nearby_allow(text, idx + 1, AUTHZ_RULE_ID)).then_some((idx + 1, term))
+        let tokens = identifier_tokens(lines[idx]);
+        let term = first_term(&tokens, &SURFACE_TERMS)
+            .or_else(|| is_create_policy(&tokens, &lines, idx).then_some(CREATE_POLICY_TERM))?;
+        Some((idx + 1, term))
     })
+}
+
+/// The first negative-proof phrase in `text`, matched as identifier tokens on
+/// a single line, in `NEGATIVE_PROOF_PHRASES` order.
+pub fn negative_proof_phrase(text: &str) -> Option<&'static str> {
+    text.lines()
+        .find_map(|line| first_term(&identifier_tokens(line), &NEGATIVE_PROOF_TERMS))
 }
 
 #[cfg(test)]
@@ -222,17 +266,42 @@ mod tests {
     }
 
     #[test]
-    fn allow_comment_skips_only_the_nearby_line() {
+    fn allow_comment_does_not_suppress_the_surface() {
         let text =
             "// jankurai:allow HLT-022-AUTHZ-ISOLATION-GAP reason=label text expires=2099-12-31\n\
-                    const adminLabel = 'Admin';\n\
-                    x();\n\
-                    y();\n\
-                    z();\n\
-                    if (user.isAdmin) {}\n";
-        assert_eq!(first_surface_line(text), Some((6, "admin")));
-        let unexpired =
-            "// jankurai:allow HLT-022-AUTHZ-ISOLATION-GAP reason=label text\nconst admin = 1;\n";
-        assert_eq!(first_surface_line(unexpired), Some((2, "admin")));
+             const adminLabel = 'Admin';\n";
+        assert_eq!(first_surface_line(text), Some((2, "admin")));
+    }
+
+    #[test]
+    fn negative_proof_matches_identifier_tokens() {
+        for (text, phrase) in [
+            ("it('denies the wrong user', () => {})", "wrong user"),
+            ("fn other_user_cannot_read() {}", "other user"),
+            ("test('nonOwner gets 404')", "non owner"),
+            ("// owner/non-owner contract", "non owner"),
+            ("expect(res.status).toBe(HTTP_FORBIDDEN);", "forbidden"),
+            ("assert_eq!(status, StatusCode::FORBIDDEN);", "forbidden"),
+            ("describe('tenant isolation', () => {})", "tenant isolation"),
+            ("fn rls_blocks_cross_tenant_reads() {}", "rls"),
+            ("await db.query('SET ROLE app; -- RLS on');", "rls"),
+        ] {
+            assert_eq!(negative_proof_phrase(text), Some(phrase), "{text}");
+        }
+    }
+
+    #[test]
+    fn negative_proof_ignores_phrases_inside_other_words() {
+        for text in [
+            "const checked_cdp_urls = [];",
+            "expect(cdpUrls).toHaveLength(2);",
+            "for (const u of URLs) {}",
+            "IRLS refresh",
+            "it('greets another user', () => {})",
+            "const unforbiddenish = 1;",
+            "it('denies the wrong\nuser', () => {})",
+        ] {
+            assert_eq!(negative_proof_phrase(text), None, "{text}");
+        }
     }
 }

@@ -21,16 +21,18 @@ version string lives in [`VERSION`](VERSION).
 - `HLT-022-AUTHZ-ISOLATION-GAP` matches its surface terms (`owner_id`,
   `tenant_id`, `organization_id`, `org_id`, `rls`, `row level security`,
   `admin`) as whole identifier tokens, not substrings, so `rls` no longer fires
-  inside `urls`, `checked_cdp_urls`, `cdpUrlSetting` or `URLs`. Lines are split
-  on non-alphanumerics and at camelCase, digit and acronym-to-word boundaries.
-  Multi-word terms match consecutive tokens (`tenantId`, `OWNER-ID`,
-  `ROW LEVEL SECURITY`), a term also matches its plural, and `admin` also
-  matches `administrator` and `superadmin`. An all-caps run is one token: `RLS`
-  matches, but the acronym `IRLS` does not. A SQL `CREATE POLICY` with a
-  `USING (`/`WITH CHECK (` clause within three lines is now reported too. A
-  `jankurai:allow HLT-022-AUTHZ-ISOLATION-GAP reason=… expires=…` comment within
-  two lines skips that line, as for HLT-023. The negative-proof check on test
-  files is unchanged.
+  inside `urls`, `checked_cdp_urls`, `cdpUrlSetting`, `docs_urls` or `URLs`.
+  Lines are split on non-alphanumerics and at camelCase, digit and
+  acronym-to-word boundaries. Multi-word terms match consecutive tokens
+  (`tenantId`, `OWNER-ID`, `ROW LEVEL SECURITY`), a term also matches its
+  plural, and `admin` also matches `administrator` and `superadmin`. An all-caps
+  run is one token: `RLS` matches, but the acronym `IRLS` does not.
+- The negative proof that clears `HLT-022-AUTHZ-ISOLATION-GAP` uses the same
+  token matching. A test file counts only when one line holds `wrong user`,
+  `other user`, `non owner` (also `non-owner`, `nonOwner`), `forbidden`,
+  `tenant isolation` or `rls` as consecutive identifier tokens, so `urls` or
+  `cdpUrls` in a test no longer clears a real finding, and neither does
+  `another user` or a phrase split across two lines.
 - A `jankurai:allow … expires=YYYY-MM-DD` comment now suppresses a finding only
   while its expiry date is today (UTC) or later. An expired, missing or
   malformed expiry (`expires=never`, `expires=2026-02-30`) no longer
@@ -52,6 +54,11 @@ version string lives in [`VERSION`](VERSION).
 
 ### Added
 
+- `HLT-022-AUTHZ-ISOLATION-GAP` reports a SQL `CREATE POLICY` with a
+  `USING (`/`WITH CHECK (` clause within three lines as a surface. Like every
+  HLT-022 term it is read only from product code, which excludes files under
+  top-level `db/`, `migrations/`, `contracts/` and `ops/`, so it fires for SQL
+  kept under application paths, not for top-level migration folders.
 - A jeryu lane may be a package-manager command: `npm test`,
   `npm run <script>`, `npm run-script <script>`, `pnpm run <script>`,
   `yarn <script>`. It resolves through the root `package.json` `scripts` and

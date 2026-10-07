@@ -898,17 +898,10 @@ pub fn authz_isolation_hits(ctx: &AuditContext) -> Vec<FindingHit> {
     let Some((file, line, text, matched_term)) = authz_surface else {
         return vec![];
     };
+    // Negative proof is matched with the same identifier tokens as the surface,
+    // so `urls` in a test file is not `rls` proof.
     let has_negative_tests = ctx.all_files.iter().any(|file| {
-        let lower = file.text.to_ascii_lowercase();
-        is_test_file(file)
-            && (lower.contains("wrong user")
-                || lower.contains("other user")
-                || lower.contains("non-owner")
-                || lower.contains("non owner")
-                || lower.contains("forbidden")
-                || lower.contains("tenant isolation")
-                || lower.contains("owner/non-owner")
-                || lower.contains("rls"))
+        is_test_file(file) && super::authz_terms::negative_proof_phrase(&file.text).is_some()
     });
     if has_negative_tests {
         vec![]
@@ -3353,10 +3346,45 @@ fn finding_count(row: &Value) -> Result<u64> {
     }
 
     #[test]
-    fn nearby_allow_suppresses_authz_isolation_hit() {
+    fn allow_comment_does_not_suppress_authz_isolation_hit() {
         let text = "// jankurai:allow HLT-022-AUTHZ-ISOLATION-GAP reason=display label only expires=2099-12-31\nconst adminLabel = 'Admin';\n";
         let ctx = make_ctx(vec![product_file("apps/web/src/labels.ts", text)]);
-        assert!(authz_isolation_hits(&ctx).is_empty());
+        let hits = authz_isolation_hits(&ctx);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, Some(2));
+    }
+
+    #[test]
+    fn authz_isolation_url_words_in_tests_do_not_clear_the_finding() {
+        let ctx = make_ctx(vec![
+            product_file("apps/api/src/notes.ts", "return db.notes.where({ tenantId });\n"),
+            product_file(
+                "apps/api/tests/cdp.test.ts",
+                "it('keeps checked_cdp_urls', () => expect(cdpUrls).toEqual(URLs));\nit('greets another user', () => {});\n",
+            ),
+        ]);
+        let hits = authz_isolation_hits(&ctx);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].matched_term.as_deref(), Some("tenant_id"));
+    }
+
+    #[test]
+    fn authz_isolation_rls_token_in_tests_clears_the_finding() {
+        for proof in [
+            "it('rls blocks cross-tenant reads', () => {});\n",
+            "fn enable_rls_denies_other_tenant() {}\n",
+            "assert_eq!(status, StatusCode::FORBIDDEN);\n",
+            "it('nonOwner gets 404', () => {});\n",
+        ] {
+            let ctx = make_ctx(vec![
+                product_file(
+                    "apps/api/src/notes.ts",
+                    "return db.notes.where({ tenantId });\n",
+                ),
+                product_file("apps/api/tests/notes.test.ts", proof),
+            ]);
+            assert!(authz_isolation_hits(&ctx).is_empty(), "{proof}");
+        }
     }
 
     #[test]
