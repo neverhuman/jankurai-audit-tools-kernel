@@ -103,16 +103,16 @@ pub fn decide(root: &Path, config: &SmartScanConfig) -> Result<SmartScanDecision
             reason: "auditor version changed",
         });
     }
-    if !same_utc_day(state.last_full_scan_at, now_unix_secs()) {
-        // A `jankurai:allow` comment expires at a UTC date boundary, so a clean
-        // result is not carried across one.
-        return Ok(SmartScanDecision::Full {
-            reason: "UTC date changed since last full scan",
-        });
-    }
     if config.interval_secs > 0 && elapsed_since(state.last_full_scan_at) > config.interval_secs {
         return Ok(SmartScanDecision::Full {
             reason: "interval elapsed",
+        });
+    }
+    if before_utc_day_of(state.last_full_scan_at, now_unix_secs()) {
+        // A `jankurai:allow` comment expires at a UTC date boundary, so a clean
+        // result from an earlier UTC day is not carried forward.
+        return Ok(SmartScanDecision::Full {
+            reason: "UTC date changed since last full scan",
         });
     }
     if roulette(config.roulette_rate) {
@@ -220,9 +220,9 @@ fn now_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// True when two Unix timestamps fall on the same UTC calendar day.
-fn same_utc_day(a: i64, b: i64) -> bool {
-    a.div_euclid(86_400) == b.div_euclid(86_400)
+/// True when `then` falls on an earlier UTC calendar day than `now`.
+fn before_utc_day_of(then: i64, now: i64) -> bool {
+    then.div_euclid(86_400) < now.div_euclid(86_400)
 }
 
 fn elapsed_since(then: i64) -> u64 {
@@ -256,11 +256,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn same_utc_day_splits_at_midnight_utc() {
+    fn before_utc_day_of_splits_at_midnight_utc() {
         let midnight = 1_791_331_200; // 2026-10-07T00:00:00Z
-        assert!(same_utc_day(midnight, midnight + 86_399));
-        assert!(!same_utc_day(midnight - 1, midnight));
-        assert!(!same_utc_day(midnight, midnight + 86_400));
+        assert!(!before_utc_day_of(midnight, midnight + 86_399));
+        assert!(before_utc_day_of(midnight - 1, midnight));
+        assert!(before_utc_day_of(midnight, midnight + 86_400));
+        // A future timestamp (clock skew) is not an earlier day.
+        assert!(!before_utc_day_of(midnight + 86_400, midnight));
     }
 
     #[test]
