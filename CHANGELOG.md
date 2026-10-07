@@ -31,6 +31,13 @@ version string lives in [`VERSION`](VERSION).
   `jankurai:allow HLT-022-AUTHZ-ISOLATION-GAP reason=… expires=…` comment within
   two lines skips that line, as for HLT-023. The negative-proof check on test
   files is unchanged.
+- A `jankurai:allow … expires=YYYY-MM-DD` comment now suppresses a finding only
+  while its expiry date is today (UTC) or later. An expired, missing or
+  malformed expiry (`expires=never`, `expires=2026-02-30`) no longer
+  suppresses anything. Before, the date was checked for shape only, so a past
+  date suppressed forever. This applies to every detector that reads the
+  shared allow comment (HLT-010, HLT-023, HLT-031, comment hygiene, and the
+  analyzers' web-security and repo-rot detectors).
 - `typescript.types.any-boundary` (HLT-031) again fires on an empty boundary
   call such as `response.json() as any` or `(await fetch()) as T`. The
   identifier-boundary check added below also applied to the call markers, so a

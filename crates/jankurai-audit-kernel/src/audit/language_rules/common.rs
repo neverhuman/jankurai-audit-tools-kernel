@@ -1,11 +1,13 @@
 use super::catalog::{LanguageFinding, ProofWindow};
 use crate::model::FileInfo;
+use chrono::{NaiveDate, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::BTreeSet;
 
-static ALLOW_EXPIRES_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"expires=\d{4}-\d{2}-\d{2}").expect("allow expiry regex is valid"));
+static ALLOW_EXPIRES_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"expires=(\d{4}-\d{2}-\d{2})\b").expect("allow expiry regex is valid")
+});
 
 pub fn is_docs_reference_tips_or_generated(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
@@ -95,15 +97,34 @@ fn nearby_lines(text: &str, line: usize, radius: usize) -> Vec<&str> {
     lines[start..end].to_vec()
 }
 
+/// True when a `jankurai:allow <detector> reason=… expires=YYYY-MM-DD` comment
+/// within two lines of `line` is still in force today (UTC). See
+/// [`nearby_allow_on`].
 pub fn nearby_allow(text: &str, line: usize, detector_id: &str) -> bool {
+    nearby_allow_on(text, line, detector_id, Utc::now().date_naive())
+}
+
+/// [`nearby_allow`] against an explicit `today`.
+///
+/// An allow suppresses only while its expiry date is today or later. An expiry
+/// that is missing, malformed (`expires=never`, `expires=2026-02-30`) or in the
+/// past is treated as expired, so the comment suppresses nothing.
+pub fn nearby_allow_on(text: &str, line: usize, detector_id: &str, today: NaiveDate) -> bool {
     let detector = detector_id.to_ascii_lowercase();
     nearby_lines(text, line, 2).iter().any(|candidate| {
         let lower = candidate.trim().to_ascii_lowercase();
         lower.contains("jankurai:allow")
             && lower.contains(&detector)
             && lower.contains("reason=")
-            && ALLOW_EXPIRES_RE.is_match(&lower)
+            && allow_in_force(&lower, today)
     })
+}
+
+fn allow_in_force(comment: &str, today: NaiveDate) -> bool {
+    ALLOW_EXPIRES_RE
+        .captures(comment)
+        .and_then(|caps| NaiveDate::parse_from_str(&caps[1], "%Y-%m-%d").ok())
+        .is_some_and(|expires| expires >= today)
 }
 
 pub fn nearby_proof(text: &str, line: usize, keywords: &[&str]) -> bool {
@@ -579,6 +600,92 @@ mod tests {
         assert!(contains_unqualified_python_builtin_call(
             "label = 'safe'; eval(payload)",
             "eval"
+        ));
+    }
+
+    fn day(text: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+    }
+
+    fn allow(expires: &str) -> String {
+        format!("// jankurai:allow HLT-023-INPUT-BOUNDARY-GAP reason=fixture {expires}\nel.innerHTML = x;\n")
+    }
+
+    #[test]
+    fn allow_suppresses_until_its_expiry_date() {
+        let today = day("2026-10-07");
+        for expires in [
+            "expires=2026-10-07",
+            "expires=2026-10-08",
+            "expires=2099-12-31",
+        ] {
+            assert!(
+                nearby_allow_on(&allow(expires), 2, "HLT-023-INPUT-BOUNDARY-GAP", today),
+                "{expires}"
+            );
+        }
+    }
+
+    #[test]
+    fn expired_allow_does_not_suppress() {
+        let today = day("2026-10-07");
+        for expires in ["expires=2026-10-06", "expires=1970-01-01"] {
+            assert!(
+                !nearby_allow_on(&allow(expires), 2, "HLT-023-INPUT-BOUNDARY-GAP", today),
+                "{expires}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_missing_expiry_counts_as_expired() {
+        let today = day("2026-10-07");
+        for expires in [
+            "",
+            "expires=never",
+            "expires=2099-13-01",
+            "expires=2099-02-30",
+            "expires=2099-12-31x",
+            "expires=99-12-31",
+        ] {
+            assert!(
+                !nearby_allow_on(&allow(expires), 2, "HLT-023-INPUT-BOUNDARY-GAP", today),
+                "{expires:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_needs_detector_and_reason() {
+        let today = day("2026-10-07");
+        let other = "// jankurai:allow HLT-010-SECRET-SPRAWL reason=x expires=2099-12-31\nel.innerHTML = x;\n";
+        assert!(!nearby_allow_on(
+            other,
+            2,
+            "HLT-023-INPUT-BOUNDARY-GAP",
+            today
+        ));
+        let no_reason =
+            "// jankurai:allow HLT-023-INPUT-BOUNDARY-GAP expires=2099-12-31\nel.innerHTML = x;\n";
+        assert!(!nearby_allow_on(
+            no_reason,
+            2,
+            "HLT-023-INPUT-BOUNDARY-GAP",
+            today
+        ));
+    }
+
+    #[test]
+    fn nearby_allow_reads_the_clock() {
+        assert!(nearby_allow(
+            &allow("expires=2099-12-31"),
+            2,
+            "HLT-023-INPUT-BOUNDARY-GAP"
+        ));
+        assert!(!nearby_allow(
+            &allow("expires=2000-01-01"),
+            2,
+            "HLT-023-INPUT-BOUNDARY-GAP"
         ));
     }
 }
