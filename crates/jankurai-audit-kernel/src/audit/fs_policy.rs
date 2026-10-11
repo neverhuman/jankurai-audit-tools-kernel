@@ -1,4 +1,5 @@
 use crate::model::FileInfo;
+use chrono::NaiveDate;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 use std::path::Path;
@@ -70,15 +71,11 @@ impl InventoryOptions {
     }
 }
 
-/// Opt-in dead-language term allowlist from `agent/audit-policy.toml`.
+/// Legacy opt-in dead-language term allowlist from `agent/audit-policy.toml`.
 ///
-/// A repository may declare load-bearing API / protocol / domain words that the
-/// HLT-001 future-hostile heuristic would otherwise flag — e.g. the HTML
-/// `placeholder` attribute, the React `fallback` prop, or GitHub's `stale`
-/// CheckConclusion wire value. Listing a term here suppresses ONLY that exact
-/// word for the dead-marker check; every other dead-language, fallback-soup, and
-/// security check still runs on the same files. A missing/empty section means
-/// default behaviour, so repositories that do not opt in are unaffected.
+/// New policy should use reviewed `[[dead_language_allow]]` records below so
+/// exceptions are owned, dated and path-scoped. This reader stays for old policy
+/// files and suppresses ONLY that exact word for the dead-marker check.
 ///
 /// ```toml
 /// [dead_language]
@@ -89,6 +86,148 @@ pub fn dead_language_allow_terms(root: &Path) -> Vec<String> {
         .ok()
         .map(|text| parse_dead_language_allow_terms(&text))
         .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadLanguageAllowance {
+    pub name: String,
+    pub term: String,
+    pub paths: Vec<String>,
+    pub owner: Option<String>,
+    pub expires: Option<NaiveDate>,
+    pub reason: Option<String>,
+    pub incomplete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeadLanguageAllowanceMatch {
+    Active(DeadLanguageAllowance),
+    Expired(DeadLanguageAllowance),
+    Incomplete(DeadLanguageAllowance),
+}
+
+impl DeadLanguageAllowance {
+    fn matches(&self, term: &str, path: &str) -> bool {
+        self.term == term
+            && (self.paths.is_empty()
+                || self.paths.iter().any(|allowed| {
+                    path == allowed
+                        || allowed.ends_with('/') && path.starts_with(allowed)
+                        || path.starts_with(&format!("{allowed}/"))
+                }))
+    }
+
+    pub fn report_label(&self) -> String {
+        format!("dead_language_allow `{}`", self.name)
+    }
+}
+
+pub fn dead_language_allowances(root: &Path, _today: NaiveDate) -> Vec<DeadLanguageAllowance> {
+    std::fs::read_to_string(root.join("agent/audit-policy.toml"))
+        .ok()
+        .map(|text| parse_dead_language_allowances(&text))
+        .unwrap_or_default()
+}
+
+pub fn matching_dead_language_allowance(
+    allowances: &[DeadLanguageAllowance],
+    path: &str,
+    term: &str,
+    today: NaiveDate,
+) -> Option<DeadLanguageAllowanceMatch> {
+    allowances
+        .iter()
+        .filter(|allowance| allowance.matches(term, path))
+        .map(|allowance| {
+            if allowance.incomplete {
+                DeadLanguageAllowanceMatch::Incomplete(allowance.clone())
+            } else if allowance.expires.is_some_and(|expires| expires >= today) {
+                DeadLanguageAllowanceMatch::Active(allowance.clone())
+            } else {
+                DeadLanguageAllowanceMatch::Expired(allowance.clone())
+            }
+        })
+        .next()
+}
+
+fn parse_dead_language_allowances(text: &str) -> Vec<DeadLanguageAllowance> {
+    #[derive(Debug, Deserialize, Default)]
+    struct PolicyFile {
+        #[serde(default)]
+        dead_language_allow: Vec<RawAllowance>,
+    }
+
+    #[derive(Debug, Deserialize, Default)]
+    struct RawAllowance {
+        name: Option<String>,
+        term: Option<String>,
+        terms: Option<Vec<String>>,
+        paths: Option<Vec<String>>,
+        owner: Option<String>,
+        expires: Option<String>,
+        reason: Option<String>,
+    }
+
+    let parsed = match toml::from_str::<PolicyFile>(text) {
+        Ok(parsed) => parsed,
+        Err(_) => return Vec::new(),
+    };
+
+    parsed
+        .dead_language_allow
+        .into_iter()
+        .enumerate()
+        .flat_map(|(idx, raw)| {
+            let name = normalized_optional(raw.name).unwrap_or_else(|| format!("#{idx}"));
+            let paths = raw
+                .paths
+                .unwrap_or_default()
+                .into_iter()
+                .map(normalize_policy_path)
+                .filter(|path| !path.is_empty())
+                .collect::<Vec<_>>();
+            let owner = normalized_optional(raw.owner);
+            let reason = normalized_optional(raw.reason);
+            let expires = raw
+                .expires
+                .as_deref()
+                .and_then(|date| NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").ok());
+            let terms = raw
+                .terms
+                .unwrap_or_else(|| raw.term.into_iter().collect::<Vec<_>>())
+                .into_iter()
+                .map(|term| term.trim().to_ascii_lowercase())
+                .filter(|term| !term.is_empty())
+                .collect::<Vec<_>>();
+            let incomplete = paths.is_empty()
+                || owner.is_none()
+                || reason.is_none()
+                || expires.is_none()
+                || terms.is_empty();
+            terms.into_iter().map(move |term| DeadLanguageAllowance {
+                name: name.clone(),
+                term,
+                paths: paths.clone(),
+                owner: owner.clone(),
+                expires,
+                reason: reason.clone(),
+                incomplete,
+            })
+        })
+        .collect()
+}
+
+fn normalized_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_policy_path(path: String) -> String {
+    path.trim()
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn parse_dead_language_allow_terms(text: &str) -> Vec<String> {
@@ -172,7 +311,11 @@ pub struct InventoryTimings {
 
 #[cfg(test)]
 mod dead_language_allow_tests {
-    use super::parse_dead_language_allow_terms;
+    use super::{
+        matching_dead_language_allowance, parse_dead_language_allow_terms,
+        parse_dead_language_allowances, DeadLanguageAllowanceMatch,
+    };
+    use chrono::NaiveDate;
 
     #[test]
     fn absent_section_yields_empty_allowlist() {
@@ -193,6 +336,68 @@ mod dead_language_allow_tests {
     fn malformed_policy_is_safe_default() {
         // A broken policy must never panic or silently disable the rule globally.
         assert!(parse_dead_language_allow_terms("not = valid = toml =").is_empty());
+    }
+
+    #[test]
+    fn reviewed_allowances_are_path_scoped_and_expiring() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 11).unwrap();
+        let policy = r#"
+[[dead_language_allow]]
+name = "iam-todo-grant"
+terms = ["TODO"]
+paths = ["infra/iam"]
+owner = "platform"
+expires = "2026-12-31"
+reason = "External IAM grant names use todo as a stable stand-in value."
+"#;
+        let allowances = parse_dead_language_allowances(policy);
+        let matched =
+            matching_dead_language_allowance(&allowances, "infra/iam/grants.tf", "todo", today);
+        assert!(matches!(
+            matched,
+            Some(DeadLanguageAllowanceMatch::Active(_))
+        ));
+        assert!(matching_dead_language_allowance(
+            &allowances,
+            "apps/api/src/lib.rs",
+            "todo",
+            today
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn expired_or_incomplete_allowances_do_not_cover() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 11).unwrap();
+        let policy = r#"
+[[dead_language_allow]]
+name = "expired"
+term = "todo"
+paths = ["infra/iam"]
+owner = "platform"
+expires = "2026-10-10"
+reason = "Needs renewal."
+
+[[dead_language_allow]]
+name = "missing-owner"
+term = "todo"
+paths = ["agent"]
+expires = "2026-12-31"
+reason = "Needs an owner."
+"#;
+        let allowances = parse_dead_language_allowances(policy);
+        let expired =
+            matching_dead_language_allowance(&allowances, "infra/iam/grants.tf", "todo", today);
+        assert!(matches!(
+            expired,
+            Some(DeadLanguageAllowanceMatch::Expired(_))
+        ));
+        let incomplete =
+            matching_dead_language_allowance(&allowances, "agent/audit-policy.toml", "todo", today);
+        assert!(matches!(
+            incomplete,
+            Some(DeadLanguageAllowanceMatch::Incomplete(_))
+        ));
     }
 }
 

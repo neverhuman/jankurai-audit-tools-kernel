@@ -3,8 +3,10 @@ use super::language_rules;
 use super::language_rules::common::{contains_unqualified_python_builtin_call, python_code_lines};
 use super::prose;
 use super::source_context;
+use crate::audit::fs_policy::DeadLanguageAllowanceMatch;
 use crate::model::FileInfo;
 use crate::validation;
+use chrono::Utc;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -2039,6 +2041,8 @@ pub fn duplicate_blocks(ctx: &AuditContext) -> Vec<FindingHit> {
 
 pub fn future_hostile_hits(ctx: &AuditContext) -> Vec<FindingHit> {
     let allow_terms = crate::audit::fs_policy::dead_language_allow_terms(&ctx.root);
+    let today = Utc::now().date_naive();
+    let reviewed_allowances = crate::audit::fs_policy::dead_language_allowances(&ctx.root, today);
     let mut out = vec![];
     for file in product_code_files(ctx) {
         if is_future_hostile_allowlisted(&file) {
@@ -2078,28 +2082,93 @@ pub fn future_hostile_hits(ctx: &AuditContext) -> Vec<FindingHit> {
                 if term_is_declaration_identifier(active, term) {
                     continue;
                 }
-                // Opt-in domain / platform-API allowlist
-                // (`agent/audit-policy.toml` -> `[dead_language] allow_terms`):
-                // suppress ONLY the exact words a repository has declared
-                // load-bearing — e.g. the HTML `placeholder` attribute, the
-                // React `fallback` prop, or GitHub's `stale` CheckConclusion
-                // value. An empty/absent list keeps the default behaviour, so
-                // repositories that do not opt in are unaffected.
-                if allow_terms.iter().any(|allowed| allowed == term) {
+                // Legacy global term allowlist stays for old policies. New
+                // reviewed allowances are path-scoped records and are reported
+                // even when they leave the cap.
+                let allowance = crate::audit::fs_policy::matching_dead_language_allowance(
+                    &reviewed_allowances,
+                    &file.rel_path,
+                    term,
+                    today,
+                );
+                if allow_terms.iter().any(|allowed| allowed == term) && allowance.is_none() {
                     continue;
                 }
+                let (problem, agent_fix) =
+                    future_hostile_allowance_context(term, allowance.as_ref());
                 out.push(FindingHit {
                     path: file.rel_path.clone(),
                     line: Some(line.line_no),
                     text: active.to_string(),
                     matched_term: Some(term.clone()),
-                    agent_fix: "remove or rename the marker, implement the intended behavior, model a typed unsupported state, or move docs/generated/vendor/product-copy text into an allowlisted context".into(),
-                    problem: format!("future-hostile/dead-language term `{}` appears", term),
+                    agent_fix,
+                    problem,
                 });
             }
         }
     }
     out
+}
+
+pub fn future_hostile_cap_hits(ctx: &AuditContext) -> Vec<FindingHit> {
+    future_hostile_hits(ctx)
+        .into_iter()
+        .filter(|hit| {
+            !hit.problem
+                .contains("covered by active dead_language_allow")
+        })
+        .collect()
+}
+
+fn future_hostile_allowance_context(
+    term: &str,
+    allowance: Option<&DeadLanguageAllowanceMatch>,
+) -> (String, String) {
+    let default_fix = "remove or rename the marker, implement the intended behavior, model a typed unsupported state, or move docs/generated/vendor/product-copy text into an allowlisted context";
+    match allowance {
+        Some(DeadLanguageAllowanceMatch::Active(record)) => {
+            let owner = record.owner.as_deref().unwrap_or("unknown");
+            let expires = record
+                .expires
+                .map(|date| date.to_string())
+                .unwrap_or_else(|| "unknown".into());
+            let reason = record.reason.as_deref().unwrap_or("unspecified");
+            (
+                format!(
+                    "future-hostile/dead-language term `{term}` appears; covered by active dead_language_allow `{}` owned by `{owner}` until {expires}: {reason}",
+                    record.name
+                ),
+                format!(
+                    "review or remove {} before {expires}; if the term is still deliberate, renew it with owner, paths, expiry and reason",
+                    record.report_label()
+                ),
+            )
+        }
+        Some(DeadLanguageAllowanceMatch::Expired(record)) => (
+            format!(
+                "future-hostile/dead-language term `{term}` appears; expired {} must be renewed or removed",
+                record.report_label()
+            ),
+            format!(
+                "{default_fix}; renew {} with a future expires date only if the term remains deliberate",
+                record.report_label()
+            ),
+        ),
+        Some(DeadLanguageAllowanceMatch::Incomplete(record)) => (
+            format!(
+                "future-hostile/dead-language term `{term}` appears; incomplete {} cannot cover it",
+                record.report_label()
+            ),
+            format!(
+                "{default_fix}; complete {} with owner, paths, expires and reason before relying on it",
+                record.report_label()
+            ),
+        ),
+        None => (
+            format!("future-hostile/dead-language term `{term}` appears"),
+            default_fix.into(),
+        ),
+    }
 }
 
 /// Words that mark debt on their own. Every other future-hostile word is ordinary engineering
@@ -3158,6 +3227,139 @@ fn finding_count(row: &Value) -> Result<u64> {
     }
 
     #[test]
+    fn future_hostile_reviewed_allowance_stays_reported_but_leaves_cap() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("agent")).unwrap();
+        std::fs::write(
+            root.path().join("agent/audit-policy.toml"),
+            r#"
+[[dead_language_allow]]
+name = "iam-todo-grant"
+term = "todo"
+paths = ["infra/iam"]
+owner = "platform"
+expires = "2099-12-31"
+reason = "External IAM grant names use todo as a stable stand-in value."
+"#,
+        )
+        .unwrap();
+        let ctx = make_ctx_at(
+            root.path(),
+            vec![product_file(
+                "infra/iam/grants.rs",
+                "locals { grant_name = \"todo grant\" }\n",
+            )],
+        );
+
+        let reported = future_hostile_hits(&ctx);
+        assert_eq!(reported.len(), 1);
+        assert!(reported[0]
+            .problem
+            .contains("covered by active dead_language_allow `iam-todo-grant`"));
+        assert!(reported[0].problem.contains("platform"));
+        assert!(reported[0].problem.contains("2099-12-31"));
+        assert!(
+            future_hostile_cap_hits(&ctx).is_empty(),
+            "covered records should stay visible without applying the cap"
+        );
+    }
+
+    #[test]
+    fn future_hostile_reviewed_allowance_is_path_scoped() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("agent")).unwrap();
+        std::fs::write(
+            root.path().join("agent/audit-policy.toml"),
+            r#"
+[[dead_language_allow]]
+name = "iam-todo-grant"
+term = "todo"
+paths = ["infra/iam"]
+owner = "platform"
+expires = "2099-12-31"
+reason = "External IAM grant names use todo as a stable stand-in value."
+"#,
+        )
+        .unwrap();
+        let ctx = make_ctx_at(
+            root.path(),
+            vec![product_file(
+                "apps/api/src/grants.rs",
+                "const GRANT_NAME: &str = \"todo grant\";\n",
+            )],
+        );
+
+        let hits = future_hostile_cap_hits(&ctx);
+        assert_eq!(hits.len(), 1);
+        assert!(!hits[0].problem.contains("covered by active"));
+    }
+
+    #[test]
+    fn future_hostile_expired_or_incomplete_allowance_counts_again() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("agent")).unwrap();
+        std::fs::write(
+            root.path().join("agent/audit-policy.toml"),
+            r#"
+[[dead_language_allow]]
+name = "expired-iam-todo-grant"
+term = "todo"
+paths = ["infra/iam"]
+owner = "platform"
+expires = "2000-01-01"
+reason = "External IAM grant names use todo as a stable stand-in value."
+
+[[dead_language_allow]]
+name = "missing-owner"
+term = "todo"
+paths = ["agent"]
+expires = "2099-12-31"
+reason = "Needs an owner."
+"#,
+        )
+        .unwrap();
+        let expired_ctx = make_ctx_at(
+            root.path(),
+            vec![product_file(
+                "infra/iam/grants.rs",
+                "locals { grant_name = \"todo grant\" }\n",
+            )],
+        );
+        let expired_hits = future_hostile_cap_hits(&expired_ctx);
+        assert_eq!(expired_hits.len(), 1);
+        assert!(expired_hits[0]
+            .problem
+            .contains("expired dead_language_allow `expired-iam-todo-grant`"));
+
+        let incomplete_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(incomplete_root.path().join("agent")).unwrap();
+        std::fs::write(
+            incomplete_root.path().join("agent/audit-policy.toml"),
+            r#"
+[[dead_language_allow]]
+name = "missing-owner"
+term = "todo"
+paths = ["infra/iam"]
+expires = "2099-12-31"
+reason = "Needs an owner."
+"#,
+        )
+        .unwrap();
+        let incomplete_ctx = make_ctx_at(
+            incomplete_root.path(),
+            vec![product_file(
+                "infra/iam/grants.rs",
+                "const GRANT_NAME: &str = \"todo grant\";\n",
+            )],
+        );
+        let incomplete_hits = future_hostile_cap_hits(&incomplete_ctx);
+        assert_eq!(incomplete_hits.len(), 1);
+        assert!(incomplete_hits[0]
+            .problem
+            .contains("incomplete dead_language_allow `missing-owner`"));
+    }
+
+    #[test]
     fn future_hostile_weak_words_in_non_rust_code_need_a_string_literal() {
         // Outside string literals a weak word is an identifier, even next to `remove`.
         let text = "fs.removeSync(temporary); cleanupLegacy(legacy);\n";
@@ -3253,8 +3455,12 @@ fn finding_count(row: &Value) -> Result<u64> {
     }
 
     fn make_ctx(files: Vec<FileInfo>) -> AuditContext {
+        make_ctx_at(std::path::Path::new("."), files)
+    }
+
+    fn make_ctx_at(root: &std::path::Path, files: Vec<FileInfo>) -> AuditContext {
         AuditContext {
-            root: std::path::PathBuf::from("."),
+            root: root.to_path_buf(),
             scope_files: files.clone(),
             all_files: files,
             scope_paths: vec![],

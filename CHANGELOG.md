@@ -8,6 +8,13 @@ version string lives in [`VERSION`](VERSION).
 
 ## [Unreleased]
 
+### Changed
+
+- `HLT-001` dead-language exceptions now use reviewed, owned, expiring
+  `[[dead_language_allow]]` records scoped to paths. Covered hits stay visible
+  with owner, expiry and reason while leaving the cap; outside-scope, expired
+  or incomplete records count again and name the record to renew.
+
 ## [1.7.3] - 2026-10-07
 
 ### Changed
