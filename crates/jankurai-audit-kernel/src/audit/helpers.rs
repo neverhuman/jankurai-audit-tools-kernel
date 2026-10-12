@@ -134,6 +134,76 @@ pub fn has_jankurai_audit_ci_lane(ctx: &AuditContext) -> bool {
         || real_command_surface_contains(ctx, &["cargo run -p jankurai", "repo-score"])
 }
 
+pub const DOCS_ONLY_NEUTRAL_SCORE: i32 = 90;
+
+pub fn has_authored_product_code(ctx: &AuditContext) -> bool {
+    product_code_files(ctx).iter().any(|f| f.is_code)
+}
+
+pub fn declared_target_stack(ctx: &AuditContext) -> Option<String> {
+    #[derive(Debug, Deserialize, Default)]
+    struct AuditPolicyFile {
+        target_stack: Option<String>,
+    }
+
+    std::fs::read_to_string(ctx.root.join("agent/audit-policy.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<AuditPolicyFile>(&text).ok())
+        .and_then(|policy| policy.target_stack)
+        .map(|stack| stack.trim().to_ascii_lowercase())
+        .filter(|stack| !stack.is_empty())
+}
+
+pub fn declared_docs_target_stack(ctx: &AuditContext) -> bool {
+    declared_target_stack(ctx).as_deref() == Some("docs") && !has_authored_product_code(ctx)
+}
+
+/// A repository with no authored adopter product code should not be scored down
+/// for product-only dimensions such as app tool replacement or runtime telemetry.
+///
+/// `target_stack = "docs"` is an explicit opt-in, but the underlying shape is
+/// still validated against the tree: adding product code makes this return
+/// false, so the product dimensions come back into scope.
+pub fn docs_only_repo(ctx: &AuditContext) -> bool {
+    !has_authored_product_code(ctx)
+}
+
+pub fn docs_only_not_applicable_dimension(
+    ctx: &AuditContext,
+    name: &str,
+) -> Option<DimensionResult> {
+    if !docs_only_repo(ctx) {
+        return None;
+    }
+    match name {
+        "Jankurai tool adoption and CI replacement" => Some(make_dim(
+            name,
+            DOCS_ONLY_NEUTRAL_SCORE,
+            vec!["not_applicable: no authored product code files in scope".into()],
+            vec![
+                "docs-only repositories are scored on their docs, lanes, and safety evidence instead of product tool replacement".into(),
+            ],
+        )),
+        "Observability and repair evidence" => Some(make_dim(
+            name,
+            DOCS_ONLY_NEUTRAL_SCORE,
+            vec!["not_applicable: no runtime product surface to trace or repair".into()],
+            vec![
+                "structured runtime observability checks apply when authored product code is present".into(),
+            ],
+        )),
+        _ => None,
+    }
+}
+
+pub fn security_sbom_provenance_applicable(ctx: &AuditContext) -> bool {
+    has_authored_product_code(ctx) || has_release_artifact_surface(ctx)
+}
+
+pub fn security_in_ci_audit_applicable(ctx: &AuditContext) -> bool {
+    security_sbom_provenance_applicable(ctx)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ToolAdoptionCatalogEntry {
     pub id: &'static str,
@@ -458,109 +528,142 @@ pub fn tool_adoption_ci_text(ctx: &AuditContext) -> String {
 }
 
 fn tool_audit_ci_applicable(ctx: &AuditContext) -> bool {
-    is_high_risk_repo(ctx)
+    !docs_only_repo(ctx) && is_high_risk_repo(ctx)
 }
 
 fn tool_proof_routing_applicable(ctx: &AuditContext) -> bool {
-    tool_adoption_control_plane_present(ctx)
+    !docs_only_repo(ctx) && tool_adoption_control_plane_present(ctx)
 }
 
 fn tool_security_applicable(ctx: &AuditContext) -> bool {
-    is_high_risk_repo(ctx)
-        || ctx.all_files.iter().any(|f| {
-            matches!(
-                f.name.as_str(),
-                "Cargo.toml" | "package.json" | "Cargo.lock" | "package-lock.json"
-            )
-        })
+    !docs_only_repo(ctx)
+        && (is_high_risk_repo(ctx)
+            || ctx.all_files.iter().any(|f| {
+                matches!(
+                    f.name.as_str(),
+                    "Cargo.toml" | "package.json" | "Cargo.lock" | "package-lock.json"
+                )
+            }))
 }
 
 fn tool_ux_qa_applicable(ctx: &AuditContext) -> bool {
-    has_web_surface(ctx)
+    !docs_only_repo(ctx) && has_web_surface(ctx)
 }
 
 fn tool_db_migration_applicable(ctx: &AuditContext) -> bool {
-    ctx.all_files.iter().any(|f| {
-        (f.rel_path.starts_with("db/migrations/") || f.rel_path.starts_with("migrations/"))
-            && f.suffix == ".sql"
-    })
+    !docs_only_repo(ctx)
+        && ctx.all_files.iter().any(|f| {
+            (f.rel_path.starts_with("db/migrations/") || f.rel_path.starts_with("migrations/"))
+                && f.suffix == ".sql"
+        })
 }
 
 fn tool_contract_drift_applicable(ctx: &AuditContext) -> bool {
-    has_contract_surface(ctx)
-        || has_generated_contracts(ctx)
-        || ctx
-            .all_files
-            .iter()
-            .any(|f| f.rel_path == "agent/generated-zones.toml")
+    !docs_only_repo(ctx)
+        && (has_contract_surface(ctx)
+            || has_generated_contracts(ctx)
+            || ctx
+                .all_files
+                .iter()
+                .any(|f| f.rel_path == "agent/generated-zones.toml"))
 }
 
 fn tool_rust_witness_applicable(ctx: &AuditContext) -> bool {
-    has_rust_surface(ctx)
+    !docs_only_repo(ctx) && has_rust_surface(ctx)
 }
 
 fn tool_copy_code_applicable(ctx: &AuditContext) -> bool {
-    product_code_files(ctx).iter().any(|f| f.is_code)
+    has_authored_product_code(ctx)
 }
 
 fn tool_vibe_coverage_applicable(ctx: &AuditContext) -> bool {
-    ctx.all_files
-        .iter()
-        .any(|f| f.rel_path == "agent/vibe-coverage.toml")
+    !docs_only_repo(ctx)
+        && ctx
+            .all_files
+            .iter()
+            .any(|f| f.rel_path == "agent/vibe-coverage.toml")
 }
 
 fn tool_coverage_evidence_applicable(ctx: &AuditContext) -> bool {
-    ctx.all_files
-        .iter()
-        .any(|f| f.rel_path == "agent/coverage-sources.toml")
+    !docs_only_repo(ctx)
+        && ctx
+            .all_files
+            .iter()
+            .any(|f| f.rel_path == "agent/coverage-sources.toml")
 }
 
 fn tool_authz_matrix_applicable(ctx: &AuditContext) -> bool {
-    ctx.all_files.iter().any(|f| {
-        prose::allows_word_scan(f) && {
-            let lower = f.text.to_ascii_lowercase();
-            lower.contains("auth")
-                || lower.contains("owner_id")
-                || lower.contains("tenant_id")
-                || lower.contains("rls")
-        }
-    })
+    !docs_only_repo(ctx)
+        && ctx.all_files.iter().any(|f| {
+            prose::allows_word_scan(f) && {
+                let lower = f.text.to_ascii_lowercase();
+                lower.contains("auth")
+                    || lower.contains("owner_id")
+                    || lower.contains("tenant_id")
+                    || lower.contains("rls")
+            }
+        })
 }
 
 fn tool_input_boundary_applicable(ctx: &AuditContext) -> bool {
-    product_code_files(ctx).iter().any(|f| {
-        let lower = f.text.to_ascii_lowercase();
-        lower.contains("eval(")
-            || lower.contains("exec(")
-            || lower.contains("fetch(")
-            || lower.contains("innerhtml")
-            || lower.contains("select * from")
-    })
+    !docs_only_repo(ctx)
+        && product_code_files(ctx).iter().any(|f| {
+            let lower = f.text.to_ascii_lowercase();
+            lower.contains("eval(")
+                || lower.contains("exec(")
+                || lower.contains("fetch(")
+                || lower.contains("innerhtml")
+                || lower.contains("select * from")
+        })
 }
 
 fn tool_agent_tool_supply_applicable(ctx: &AuditContext) -> bool {
-    ctx.all_files.iter().any(|f| {
-        f.rel_path.starts_with("agent/")
-            || f.rel_path.starts_with(".agents/")
-            || f.rel_path.starts_with(".cursor/")
-    })
+    !docs_only_repo(ctx)
+        && ctx.all_files.iter().any(|f| {
+            f.rel_path.starts_with("agent/")
+                || f.rel_path.starts_with(".agents/")
+                || f.rel_path.starts_with(".cursor/")
+        })
 }
 
 fn tool_release_readiness_applicable(ctx: &AuditContext) -> bool {
-    ctx.all_files.iter().any(|f| {
-        prose::allows_word_scan(f) && {
-            let lower = f.text.to_ascii_lowercase();
-            lower.contains("release") || lower.contains("launch") || lower.contains("rollback")
-        }
-    })
+    !docs_only_repo(ctx)
+        && ctx.all_files.iter().any(|f| {
+            prose::allows_word_scan(f) && {
+                let lower = f.text.to_ascii_lowercase();
+                lower.contains("release") || lower.contains("launch") || lower.contains("rollback")
+            }
+        })
 }
 
 fn tool_cost_budget_applicable(ctx: &AuditContext) -> bool {
+    !docs_only_repo(ctx)
+        && ctx.all_files.iter().any(|f| {
+            prose::allows_word_scan(f) && {
+                let lower = f.text.to_ascii_lowercase();
+                lower.contains("budget") || lower.contains("quota") || lower.contains("spend")
+            }
+        })
+}
+
+fn has_release_artifact_surface(ctx: &AuditContext) -> bool {
     ctx.all_files.iter().any(|f| {
-        prose::allows_word_scan(f) && {
-            let lower = f.text.to_ascii_lowercase();
-            lower.contains("budget") || lower.contains("quota") || lower.contains("spend")
-        }
+        let path = f.rel_path.to_ascii_lowercase();
+        let lower = f.text.to_ascii_lowercase();
+        path == "dockerfile"
+            || path.ends_with("/dockerfile")
+            || path.starts_with("dist/")
+            || path.starts_with("release/")
+            || path.starts_with("artifacts/")
+            || (prose::allows_word_scan(f)
+                && (lower.contains("cargo publish")
+                    || lower.contains("npm publish")
+                    || lower.contains("docker push")
+                    || lower.contains("gh release")
+                    || lower.contains("cosign")
+                    || lower.contains("slsa")
+                    || lower.contains("provenance")
+                    || lower.contains("attestation")))
     })
 }
 

@@ -1,5 +1,6 @@
 use jankurai_audit_kernel::audit::{fs, helpers, scan};
 use std::fs as disk;
+use std::path::Path;
 
 fn inventory(path: &str, source: &str) -> jankurai_audit_kernel::model::FileInfo {
     let root = tempfile::tempdir().unwrap();
@@ -71,4 +72,128 @@ fn context(file: jankurai_audit_kernel::model::FileInfo) -> helpers::AuditContex
         boundary_reclassifications: vec![],
         copy_code: None,
     }
+}
+
+#[test]
+fn docs_only_repo_marks_product_tool_dimensions_not_applicable() {
+    let f = fixture(&[
+        (
+            "agent/audit-policy.toml",
+            "minimum_score = 85\ntarget_stack = \"docs\"\n",
+        ),
+        ("AGENTS.md", "# Agents\n"),
+        ("README.md", "# Internal wiki\n"),
+        ("docs/runbook.md", "# Runbook\n"),
+        (
+            "Cargo.toml",
+            "[package]\nname = \"wiki-link-lint\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "tools/wiki-link-lint.rs",
+            "fn main() {\n    println!(\"lint docs\");\n}\n",
+        ),
+        (
+            ".jeryu/ci.toml",
+            "schema_version = \"2\"\nprovider = \"jeryu\"\n\n[[lane]]\nname = \"required\"\ncommand = \"just required\"\n",
+        ),
+        (
+            "Justfile",
+            "required:\n    gitleaks detect --no-banner\n    cargo test\n",
+        ),
+    ]);
+    let ctx = &f.ctx;
+
+    assert!(helpers::docs_only_repo(ctx));
+    assert!(helpers::declared_docs_target_stack(ctx));
+    assert!(!helpers::has_authored_product_code(ctx));
+    assert_eq!(
+        helpers::TOOL_ADOPTION_CATALOG
+            .iter()
+            .filter(|entry| (entry.applicability)(ctx))
+            .count(),
+        0
+    );
+    assert!(!helpers::security_sbom_provenance_applicable(ctx));
+    assert!(!helpers::security_in_ci_audit_applicable(ctx));
+
+    let tool_dim = helpers::docs_only_not_applicable_dimension(
+        ctx,
+        "Jankurai tool adoption and CI replacement",
+    )
+    .expect("tool adoption should be neutral for docs-only repos");
+    assert_eq!(tool_dim.score, helpers::DOCS_ONLY_NEUTRAL_SCORE);
+    assert!(tool_dim
+        .evidence
+        .iter()
+        .any(|line| line.contains("not_applicable")));
+
+    let obs_dim =
+        helpers::docs_only_not_applicable_dimension(ctx, "Observability and repair evidence")
+            .expect("observability should be neutral for docs-only repos");
+    assert_eq!(obs_dim.score, helpers::DOCS_ONLY_NEUTRAL_SCORE);
+    assert!(obs_dim
+        .evidence
+        .iter()
+        .any(|line| line.contains("not_applicable")));
+}
+
+#[test]
+fn product_code_restores_product_only_dimension_applicability() {
+    let f = fixture(&[
+        (
+            "agent/audit-policy.toml",
+            "minimum_score = 85\ntarget_stack = \"docs\"\n",
+        ),
+        ("AGENTS.md", "# Agents\n"),
+        ("README.md", "# Product crate\n"),
+        (
+            "Cargo.toml",
+            "[package]\nname = \"widget-ledger\"\nversion = \"0.1.0\"\n",
+        ),
+        ("src/lib.rs", "pub fn balance() -> i64 {\n    0\n}\n"),
+    ]);
+    let ctx = &f.ctx;
+
+    assert!(helpers::has_authored_product_code(ctx));
+    assert!(!helpers::docs_only_repo(ctx));
+    assert!(!helpers::declared_docs_target_stack(ctx));
+    assert!(helpers::security_sbom_provenance_applicable(ctx));
+    assert!(helpers::security_in_ci_audit_applicable(ctx));
+    assert!(helpers::TOOL_ADOPTION_CATALOG
+        .iter()
+        .any(|entry| (entry.applicability)(ctx)));
+    assert!(helpers::docs_only_not_applicable_dimension(
+        ctx,
+        "Jankurai tool adoption and CI replacement",
+    )
+    .is_none());
+}
+
+struct Fixture {
+    _root: tempfile::TempDir,
+    ctx: helpers::AuditContext,
+}
+
+fn fixture(files: &[(&str, &str)]) -> Fixture {
+    let root = tempfile::tempdir().unwrap();
+    for (path, contents) in files {
+        write(root.path(), path, contents);
+    }
+    let all_files = fs::inventory_repo(root.path()).unwrap();
+    let ctx = helpers::AuditContext {
+        root: root.path().to_path_buf(),
+        scope_files: all_files.clone(),
+        scope_paths: vec![],
+        all_files,
+        self_audit: false,
+        boundary_reclassifications: vec![],
+        copy_code: None,
+    };
+    Fixture { _root: root, ctx }
+}
+
+fn write(root: &Path, path: &str, contents: &str) {
+    let full = root.join(path);
+    disk::create_dir_all(full.parent().unwrap()).unwrap();
+    disk::write(full, contents).unwrap();
 }
