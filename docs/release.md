@@ -16,9 +16,10 @@ with `VERSION`. Tags follow the family pattern
 
 ## Changelog
 
-Every release records its user-visible changes in
-[`CHANGELOG.md`](../CHANGELOG.md) under a heading that matches the new `VERSION`.
-The `Unreleased` section is promoted to a dated version heading at tag time.
+Release notes in [`CHANGELOG.md`](../CHANGELOG.md) are generated when a release
+is cut from the commits since the previous release, using commit subjects and
+`Todo:` trailers. At release time, promote the `Unreleased` section to a dated
+version heading under the new `VERSION` and extract the release slice.
 
 ## Release automation
 
@@ -58,7 +59,8 @@ If a release regresses:
    (`jankurai-tools-kernel-v<version>-split.<N>`).
 2. Re-point consumers at that immutable tag; tags are never moved or deleted.
 3. Open a revert commit that restores the previous `VERSION` and `CHANGELOG.md`
-   state, and add a `### Fixed` entry describing the rollback.
+   state. Its commit subject and `Todo:` trailer provide the release note for
+   the rollback.
 4. Re-run `just check` to confirm the rolled-back tree is green before
    re-publishing.
 
