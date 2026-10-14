@@ -74,50 +74,26 @@ fn context(file: jankurai_audit_kernel::model::FileInfo) -> helpers::AuditContex
     }
 }
 
-const PRODUCT_ONLY_ENTRIES: &[&str] = &[
-    "proof-routing",
-    "proofbind",
-    "proofmark-rust",
-    "copy-code",
-    "ux-qa",
-    "contract-drift",
-    "rust-witness",
-    "vibe-coverage",
-    "coverage-evidence",
-    "authz-matrix",
-    "release-readiness",
-    "cost-budget",
-];
+const DOCS_EXEMPT: &[&str] = &["coverage-evidence", "rust-witness", "proofmark-rust"];
 
-const NEVER_DOCS_GATED_ENTRIES: &[&str] = &[
-    "security",
-    "ci-bad-behavior",
-    "git-bad-behavior",
-    "release-bad-behavior",
-    "db-migration-analyze",
-    "agent-tool-supply",
-];
-
-fn applicable_ids(ctx: &helpers::AuditContext) -> Vec<&'static str> {
+fn entry(id: &str) -> &'static helpers::ToolAdoptionCatalogEntry {
     helpers::TOOL_ADOPTION_CATALOG
         .iter()
-        .filter(|entry| (entry.applicability)(ctx))
-        .map(|entry| entry.id)
-        .collect()
+        .find(|entry| entry.id == id)
+        .unwrap_or_else(|| panic!("catalog entry {id}"))
 }
 
-/// A docs repository with a small Rust lint tool, a migrations folder and
-/// agent control-plane files: no authored product surface code, but plenty
-/// for security and supply-chain checks to look at.
+/// A docs repository with a small Rust lint tool, SQL migrations, a publish
+/// script, agent control-plane files and coverage sources: no authored product
+/// surface code, but plenty for security and release checks to look at.
 fn docs_shaped_tree(policy: &str) -> Vec<(&'static str, String)> {
     vec![
         ("agent/audit-policy.toml", policy.to_string()),
         ("agent/vibe-coverage.toml", "schema_version = 1\n".into()),
+        ("agent/coverage-sources.toml", "schema_version = 1\n".into()),
+        ("agent/generated-zones.toml", "# none\n".into()),
         ("AGENTS.md", "# Agents\n".into()),
-        (
-            "README.md",
-            "# Internal wiki\n\nRelease and rollback notes. Auth runbook. Budget quota.\n".into(),
-        ),
+        ("README.md", "# Internal wiki\n".into()),
         ("docs/runbook.md", "# Runbook\n".into()),
         (
             "Cargo.toml",
@@ -137,13 +113,31 @@ fn docs_shaped_tree(policy: &str) -> Vec<(&'static str, String)> {
         ),
         (
             "scripts/publish.sh",
-            "#!/usr/bin/env bash\n# release, rollback, auth token, budget quota\necho ok\n".into(),
+            "#!/usr/bin/env bash\n# release, rollback, auth token, owner_id, budget quota\necho ok\n"
+                .into(),
         ),
     ]
 }
 
 #[test]
-fn docs_opt_in_without_product_code_skips_only_product_entries() {
+fn docs_only_exemptions_never_touch_security_or_release_integrity() {
+    for (id, why) in helpers::DOCS_ONLY_EXEMPT_TOOL_IDS {
+        let category = entry(id).category;
+        assert!(
+            !matches!(category, "security" | "release" | "git" | "ci" | "db"),
+            "{id} ({category}) must not be docs-exempt"
+        );
+        assert!(!why.is_empty(), "{id} needs a justification");
+    }
+    let ids: Vec<&str> = helpers::DOCS_ONLY_EXEMPT_TOOL_IDS
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(ids, DOCS_EXEMPT);
+}
+
+#[test]
+fn docs_opt_in_exempts_only_product_measuring_entries_and_says_why() {
     let tree = docs_shaped_tree("minimum_score = 85\ntarget_stack = \"docs\"\n");
     let f = fixture_owned(&tree);
     let ctx = &f.ctx;
@@ -152,90 +146,93 @@ fn docs_opt_in_without_product_code_skips_only_product_entries() {
     assert!(!helpers::has_authored_product_code(ctx));
     assert!(helpers::docs_only_repo(ctx));
 
-    let applicable = applicable_ids(ctx);
-    for id in PRODUCT_ONLY_ENTRIES {
+    for catalog_entry in helpers::TOOL_ADOPTION_CATALOG {
+        let got = helpers::tool_adoption_applicability(catalog_entry, ctx);
+        if DOCS_EXEMPT.contains(&catalog_entry.id) {
+            assert_eq!(
+                got,
+                helpers::ToolApplicability {
+                    applicable: false,
+                    not_applicable_reason: Some(
+                        "not applicable: docs-only (target_stack=docs, no authored product code)"
+                    ),
+                },
+                "{}",
+                catalog_entry.id
+            );
+        } else {
+            // Every other entry, security and release integrity included, is
+            // exactly its own predicate: never docs-gated, never silent.
+            assert_eq!(
+                got,
+                helpers::ToolApplicability {
+                    applicable: (catalog_entry.applicability)(ctx),
+                    not_applicable_reason: None,
+                },
+                "{}",
+                catalog_entry.id
+            );
+        }
+    }
+    for id in [
+        "security",
+        "ci-bad-behavior",
+        "git-bad-behavior",
+        "release-bad-behavior",
+        "release-readiness",
+        "authz-matrix",
+        "db-migration-analyze",
+        "agent-tool-supply",
+        "contract-drift",
+        "vibe-coverage",
+        "cost-budget",
+    ] {
         assert!(
-            !applicable.contains(id),
-            "{id} should be not applicable for an opted-in docs repo"
+            helpers::tool_adoption_applicability(entry(id), ctx).applicable,
+            "{id} must stay applicable for an opted-in docs repo"
         );
     }
-    for id in NEVER_DOCS_GATED_ENTRIES {
-        assert!(
-            applicable.contains(id),
-            "{id} must stay applicable even for an opted-in docs repo: {applicable:?}"
-        );
-    }
-    assert!(!helpers::security_sbom_provenance_applicable(ctx));
-    assert!(!helpers::security_in_ci_audit_applicable(ctx));
-
-    let tool_dim = helpers::docs_only_not_applicable_dimension(
-        ctx,
-        "Jankurai tool adoption and CI replacement",
-    )
-    .expect("tool adoption should be neutral for docs-only repos");
-    assert_eq!(tool_dim.score, helpers::DOCS_ONLY_NEUTRAL_SCORE);
-    assert!(tool_dim
-        .evidence
-        .iter()
-        .any(|line| line.contains("not_applicable")));
-
-    let obs_dim =
-        helpers::docs_only_not_applicable_dimension(ctx, "Observability and repair evidence")
-            .expect("observability should be neutral for docs-only repos");
-    assert_eq!(obs_dim.score, helpers::DOCS_ONLY_NEUTRAL_SCORE);
+    // The exemption is visible: coverage-evidence would otherwise apply here.
+    assert!((entry("coverage-evidence").applicability)(ctx));
 }
 
 #[test]
 fn code_repo_without_docs_opt_in_keeps_every_check() {
-    // Same tree shape (code only under tools/ and migrations/, outside the
-    // product surface) but no `target_stack = "docs"` opt-in: nothing may be
-    // switched off.
     for policy in [
-        "minimum_score = 85\n".to_string(),
-        "minimum_score = 85\ntarget_stack = \"rust-ts-vite-react-postgres-bounded-python\"\n"
-            .to_string(),
-        "minimum_score = = broken\ntarget_stack = \"docs\"\n".to_string(),
+        "minimum_score = 85\n",
+        "minimum_score = 85\ntarget_stack = \"rust-ts-vite-react-postgres-bounded-python\"\n",
+        "minimum_score = = broken\ntarget_stack = \"docs\"\n",
+        // Schema-invalid (minimum_score out of range): never trusted.
+        "minimum_score = 500\ntarget_stack = \"docs\"\n",
     ] {
-        let tree = docs_shaped_tree(&policy);
+        let tree = docs_shaped_tree(policy);
         let f = fixture_owned(&tree);
         let ctx = &f.ctx;
 
         assert!(!helpers::has_authored_product_code(ctx));
         assert!(!helpers::docs_only_repo(ctx), "policy: {policy}");
-
-        let applicable = applicable_ids(ctx);
-        for id in NEVER_DOCS_GATED_ENTRIES.iter().chain(
-            [
-                "vibe-coverage",
-                "authz-matrix",
-                "release-readiness",
-                "cost-budget",
-            ]
-            .iter(),
-        ) {
-            assert!(
-                applicable.contains(id),
-                "{id} must stay applicable without the docs opt-in ({policy}): {applicable:?}"
+        for catalog_entry in helpers::TOOL_ADOPTION_CATALOG {
+            let got = helpers::tool_adoption_applicability(catalog_entry, ctx);
+            assert_eq!(got.not_applicable_reason, None, "{}", catalog_entry.id);
+            assert_eq!(
+                got.applicable,
+                (catalog_entry.applicability)(ctx),
+                "{} ({policy})",
+                catalog_entry.id
             );
         }
-        assert!(helpers::security_sbom_provenance_applicable(ctx));
-        assert!(helpers::security_in_ci_audit_applicable(ctx));
-        for name in [
-            "Jankurai tool adoption and CI replacement",
-            "Observability and repair evidence",
-        ] {
-            assert!(helpers::docs_only_not_applicable_dimension(ctx, name).is_none());
-        }
+        assert!(helpers::tool_adoption_applicability(entry("coverage-evidence"), ctx).applicable);
     }
 }
 
 #[test]
-fn product_code_restores_product_only_dimension_applicability() {
+fn product_code_overrides_the_docs_declaration() {
     let f = fixture(&[
         (
             "agent/audit-policy.toml",
             "minimum_score = 85\ntarget_stack = \"docs\"\n",
         ),
+        ("agent/coverage-sources.toml", "schema_version = 1\n"),
         ("AGENTS.md", "# Agents\n"),
         ("README.md", "# Product crate\n"),
         (
@@ -246,18 +243,39 @@ fn product_code_restores_product_only_dimension_applicability() {
     ]);
     let ctx = &f.ctx;
 
-    // The declaration is present, but product code overrides it.
     assert!(helpers::declared_docs_target_stack(ctx));
     assert!(helpers::has_authored_product_code(ctx));
     assert!(!helpers::docs_only_repo(ctx));
-    assert!(helpers::security_sbom_provenance_applicable(ctx));
-    assert!(helpers::security_in_ci_audit_applicable(ctx));
-    assert!(applicable_ids(ctx).contains(&"copy-code"));
-    assert!(helpers::docs_only_not_applicable_dimension(
-        ctx,
-        "Jankurai tool adoption and CI replacement",
-    )
-    .is_none());
+    for id in DOCS_EXEMPT {
+        let got = helpers::tool_adoption_applicability(entry(id), ctx);
+        assert_eq!(got.not_applicable_reason, None);
+        assert_eq!(got.applicable, (entry(id).applicability)(ctx));
+    }
+    assert!(helpers::tool_adoption_applicability(entry("coverage-evidence"), ctx).applicable);
+}
+
+#[test]
+fn declared_target_stack_reads_the_full_policy_even_past_the_text_cap() {
+    // Pad the policy past a tiny capture cap: the inventory only holds a
+    // truncated sample, but the declaration must still be read from the file.
+    let padding = "# padding\n".repeat(64);
+    let policy = format!(
+        "minimum_score = 85\n{padding}target_stack = \"docs\"\n\n[scan]\ntext_capture_chars = 16\n"
+    );
+    let f = fixture(&[
+        ("agent/audit-policy.toml", policy.as_str()),
+        ("README.md", "# Docs\n"),
+    ]);
+    assert!(f
+        .ctx
+        .all_files
+        .iter()
+        .filter(|file| file.rel_path == "agent/audit-policy.toml")
+        .all(|file| !file.text.contains("target_stack")));
+    assert_eq!(
+        helpers::declared_target_stack(&f.ctx).as_deref(),
+        Some("docs")
+    );
 }
 
 fn fixture_owned(files: &[(&'static str, String)]) -> Fixture {

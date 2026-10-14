@@ -134,86 +134,95 @@ pub fn has_jankurai_audit_ci_lane(ctx: &AuditContext) -> bool {
         || real_command_surface_contains(ctx, &["cargo run -p jankurai", "repo-score"])
 }
 
-pub const DOCS_ONLY_NEUTRAL_SCORE: i32 = 90;
-
 pub fn has_authored_product_code(ctx: &AuditContext) -> bool {
     product_code_files(ctx).iter().any(|f| f.is_code)
 }
 
-/// `target_stack` declared in the inventoried `agent/audit-policy.toml`, read
-/// from `ctx.all_files` like every other predicate (no extra disk read). A
-/// missing or unparsable policy yields `None`, which never opts a repo out of
-/// any check.
+/// `target_stack` declared in `agent/audit-policy.toml`.
+///
+/// Reads the whole file from disk like the other policy readers (the inventory
+/// only holds a capped text sample, and `scan.excluded_paths` can drop the file
+/// from it) and validates it against the audit-policy schema. A missing,
+/// unreadable, malformed or schema-invalid policy yields `None`.
 pub fn declared_target_stack(ctx: &AuditContext) -> Option<String> {
-    ctx.all_files
-        .iter()
-        .find(|f| f.rel_path == "agent/audit-policy.toml")
-        .and_then(|f| toml::from_str::<toml::Value>(&f.text).ok())
-        .and_then(|policy| {
-            policy
-                .get("target_stack")
-                .and_then(|stack| stack.as_str())
-                .map(|stack| stack.trim().to_ascii_lowercase())
-        })
+    let text = std::fs::read_to_string(ctx.root.join("agent/audit-policy.toml")).ok()?;
+    let policy = crate::validation::validate_audit_policy_toml_text(&ctx.root, &text).ok()?;
+    policy
+        .get("target_stack")
+        .and_then(|stack| stack.as_str())
+        .map(|stack| stack.trim().to_ascii_lowercase())
         .filter(|stack| !stack.is_empty())
 }
 
-/// Pure declaration check: the policy says `target_stack = "docs"`. It says
-/// nothing about the tree; see [`docs_only_repo`] for the gate.
+/// Pure declaration check: the policy says `target_stack = "docs"`.
 pub fn declared_docs_target_stack(ctx: &AuditContext) -> bool {
     declared_target_stack(ctx).as_deref() == Some("docs")
 }
 
-/// Docs-only gate for product-only dimensions such as app tool replacement or
-/// runtime telemetry.
-///
-/// Requires BOTH the explicit `target_stack = "docs"` opt-in AND no authored
-/// product code in the tree. Tree shape alone never qualifies: a repository
-/// whose code lives in `tools/`, `scripts/`, `migrations/` etc. without the
-/// opt-in keeps every check. Adding product code to an opted-in repository
-/// brings the product dimensions back. Security, supply-chain, git, CI,
-/// release-bad-behavior, audit-lane, migration, input-boundary and
-/// agent-tool-supply checks are never gated by this predicate.
+/// Docs-only repository: the explicit `target_stack = "docs"` declaration AND
+/// no authored product code in the tree. Product code always overrides the
+/// declaration.
 pub fn docs_only_repo(ctx: &AuditContext) -> bool {
     declared_docs_target_stack(ctx) && !has_authored_product_code(ctx)
 }
 
-pub fn docs_only_not_applicable_dimension(
+/// Reason reported for every tool-adoption entry the docs-only exemption
+/// switches off. Consumers must surface it, never drop the entry silently.
+pub const DOCS_ONLY_NOT_APPLICABLE_REASON: &str =
+    "not applicable: docs-only (target_stack=docs, no authored product code)";
+
+/// The only tool-adoption entries a docs-only repository is exempt from, each
+/// with the reason it is meaningless without authored product code. Nothing in
+/// the security, supply-chain, CI/git/release-integrity, authorization,
+/// migration, input-boundary or agent-tool-supply categories may be listed
+/// here; `docs_only_exemptions_never_touch_security_or_release_integrity`
+/// pins that.
+pub const DOCS_ONLY_EXEMPT_TOOL_IDS: &[(&str, &str)] = &[
+    (
+        "coverage-evidence",
+        "ingests product test-coverage reports; with no authored product code there is no product coverage to measure",
+    ),
+    (
+        "rust-witness",
+        "witnesses runtime behaviour of product Rust code; repo tooling under tools/ or scripts/ is not product behaviour",
+    ),
+    (
+        "proofmark-rust",
+        "marks proof obligations on product Rust code; same surface as rust-witness",
+    ),
+];
+
+/// Applicability of one tool-adoption entry, with the reason whenever the
+/// docs-only exemption switched it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolApplicability {
+    pub applicable: bool,
+    /// `Some(DOCS_ONLY_NOT_APPLICABLE_REASON)` exactly when the docs-only
+    /// exemption, rather than the entry's own predicate, made it inapplicable.
+    pub not_applicable_reason: Option<&'static str>,
+}
+
+/// Docs-aware applicability for a catalog entry. `entry.applicability` itself is
+/// unchanged and never docs-gated, so a consumer that has not adopted this
+/// function keeps every check; a consumer that has adopted it gets the reason to
+/// report alongside every exemption.
+pub fn tool_adoption_applicability(
+    entry: &ToolAdoptionCatalogEntry,
     ctx: &AuditContext,
-    name: &str,
-) -> Option<DimensionResult> {
-    if !docs_only_repo(ctx) {
-        return None;
+) -> ToolApplicability {
+    let exempt = DOCS_ONLY_EXEMPT_TOOL_IDS
+        .iter()
+        .any(|(id, _)| *id == entry.id);
+    if exempt && docs_only_repo(ctx) {
+        return ToolApplicability {
+            applicable: false,
+            not_applicable_reason: Some(DOCS_ONLY_NOT_APPLICABLE_REASON),
+        };
     }
-    match name {
-        "Jankurai tool adoption and CI replacement" => Some(make_dim(
-            name,
-            DOCS_ONLY_NEUTRAL_SCORE,
-            vec!["not_applicable: no authored product code files in scope".into()],
-            vec![
-                "docs-only repositories are scored on their docs, lanes, and safety evidence instead of product tool replacement".into(),
-            ],
-        )),
-        "Observability and repair evidence" => Some(make_dim(
-            name,
-            DOCS_ONLY_NEUTRAL_SCORE,
-            vec!["not_applicable: no runtime product surface to trace or repair".into()],
-            vec![
-                "structured runtime observability checks apply when authored product code is present".into(),
-            ],
-        )),
-        _ => None,
+    ToolApplicability {
+        applicable: (entry.applicability)(ctx),
+        not_applicable_reason: None,
     }
-}
-
-/// SBOM/provenance evidence applies to every repository except an opted-in
-/// docs-only one that also ships no release artifacts.
-pub fn security_sbom_provenance_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx) || has_release_artifact_surface(ctx)
-}
-
-pub fn security_in_ci_audit_applicable(ctx: &AuditContext) -> bool {
-    security_sbom_provenance_applicable(ctx)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -319,7 +328,7 @@ pub const TOOL_ADOPTION_CATALOG: &[ToolAdoptionCatalogEntry] = &[
         local_command: "cargo test -p jankurai --test language_bad_behavior",
         ci_command: "cargo test -p jankurai --test language_bad_behavior",
         artifact_paths: &["target/jankurai/language-bad-behavior.log"],
-        applicability: tool_release_bad_behavior_applicable,
+        applicability: tool_release_readiness_applicable,
     },
     ToolAdoptionCatalogEntry {
         id: "ux-qa",
@@ -544,7 +553,7 @@ fn tool_audit_ci_applicable(ctx: &AuditContext) -> bool {
 }
 
 fn tool_proof_routing_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx) && tool_adoption_control_plane_present(ctx)
+    tool_adoption_control_plane_present(ctx)
 }
 
 fn tool_security_applicable(ctx: &AuditContext) -> bool {
@@ -558,7 +567,7 @@ fn tool_security_applicable(ctx: &AuditContext) -> bool {
 }
 
 fn tool_ux_qa_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx) && has_web_surface(ctx)
+    has_web_surface(ctx)
 }
 
 fn tool_db_migration_applicable(ctx: &AuditContext) -> bool {
@@ -569,50 +578,44 @@ fn tool_db_migration_applicable(ctx: &AuditContext) -> bool {
 }
 
 fn tool_contract_drift_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx)
-        && (has_contract_surface(ctx)
-            || has_generated_contracts(ctx)
-            || ctx
-                .all_files
-                .iter()
-                .any(|f| f.rel_path == "agent/generated-zones.toml"))
+    has_contract_surface(ctx)
+        || has_generated_contracts(ctx)
+        || ctx
+            .all_files
+            .iter()
+            .any(|f| f.rel_path == "agent/generated-zones.toml")
 }
 
 fn tool_rust_witness_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx) && has_rust_surface(ctx)
+    has_rust_surface(ctx)
 }
 
 fn tool_copy_code_applicable(ctx: &AuditContext) -> bool {
-    has_authored_product_code(ctx)
+    product_code_files(ctx).iter().any(|f| f.is_code)
 }
 
 fn tool_vibe_coverage_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx)
-        && ctx
-            .all_files
-            .iter()
-            .any(|f| f.rel_path == "agent/vibe-coverage.toml")
+    ctx.all_files
+        .iter()
+        .any(|f| f.rel_path == "agent/vibe-coverage.toml")
 }
 
 fn tool_coverage_evidence_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx)
-        && ctx
-            .all_files
-            .iter()
-            .any(|f| f.rel_path == "agent/coverage-sources.toml")
+    ctx.all_files
+        .iter()
+        .any(|f| f.rel_path == "agent/coverage-sources.toml")
 }
 
 fn tool_authz_matrix_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx)
-        && ctx.all_files.iter().any(|f| {
-            prose::allows_word_scan(f) && {
-                let lower = f.text.to_ascii_lowercase();
-                lower.contains("auth")
-                    || lower.contains("owner_id")
-                    || lower.contains("tenant_id")
-                    || lower.contains("rls")
-            }
-        })
+    ctx.all_files.iter().any(|f| {
+        prose::allows_word_scan(f) && {
+            let lower = f.text.to_ascii_lowercase();
+            lower.contains("auth")
+                || lower.contains("owner_id")
+                || lower.contains("tenant_id")
+                || lower.contains("rls")
+        }
+    })
 }
 
 fn tool_input_boundary_applicable(ctx: &AuditContext) -> bool {
@@ -635,12 +638,6 @@ fn tool_agent_tool_supply_applicable(ctx: &AuditContext) -> bool {
 }
 
 fn tool_release_readiness_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx) && tool_release_bad_behavior_applicable(ctx)
-}
-
-/// Release bad-behavior review guards tags and artifacts, so it is never
-/// switched off by the docs-only gate.
-fn tool_release_bad_behavior_applicable(ctx: &AuditContext) -> bool {
     ctx.all_files.iter().any(|f| {
         prose::allows_word_scan(f) && {
             let lower = f.text.to_ascii_lowercase();
@@ -650,33 +647,11 @@ fn tool_release_bad_behavior_applicable(ctx: &AuditContext) -> bool {
 }
 
 fn tool_cost_budget_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx)
-        && ctx.all_files.iter().any(|f| {
-            prose::allows_word_scan(f) && {
-                let lower = f.text.to_ascii_lowercase();
-                lower.contains("budget") || lower.contains("quota") || lower.contains("spend")
-            }
-        })
-}
-
-fn has_release_artifact_surface(ctx: &AuditContext) -> bool {
     ctx.all_files.iter().any(|f| {
-        let path = f.rel_path.to_ascii_lowercase();
-        let lower = f.text.to_ascii_lowercase();
-        path == "dockerfile"
-            || path.ends_with("/dockerfile")
-            || path.starts_with("dist/")
-            || path.starts_with("release/")
-            || path.starts_with("artifacts/")
-            || (prose::allows_word_scan(f)
-                && (lower.contains("cargo publish")
-                    || lower.contains("npm publish")
-                    || lower.contains("docker push")
-                    || lower.contains("gh release")
-                    || lower.contains("cosign")
-                    || lower.contains("slsa")
-                    || lower.contains("provenance")
-                    || lower.contains("attestation")))
+        prose::allows_word_scan(f) && {
+            let lower = f.text.to_ascii_lowercase();
+            lower.contains("budget") || lower.contains("quota") || lower.contains("spend")
+        }
     })
 }
 

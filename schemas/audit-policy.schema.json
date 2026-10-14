@@ -12,7 +12,10 @@
     "auditor_version": { "type": "string" },
     "schema_version": { "type": "string" },
     "paper_edition": { "type": "string" },
-    "target_stack": { "type": "string" },
+    "target_stack": {
+      "type": "string",
+      "description": "Declared target stack. The value \"docs\" marks a docs-only repository: when the tree also has no authored product code, only the tool-adoption entries in helpers::DOCS_ONLY_EXEMPT_TOOL_IDS (coverage-evidence, rust-witness, proofmark-rust) become not applicable, each reported with the reason \"not applicable: docs-only (target_stack=docs, no authored product code)\". It never affects security, supply-chain, authorization or release-integrity checks, findings or caps."
+    },
     "history": {
       "type": "object",
       "properties": {

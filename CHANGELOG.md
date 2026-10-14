@@ -10,12 +10,13 @@ version string lives in [`VERSION`](VERSION).
 
 ### Added
 
-- `helpers::docs_only_repo` gates product-only tool-adoption entries and the
-  `docs_only_not_applicable_dimension` helper. It requires the explicit
-  `target_stack = "docs"` opt-in in `agent/audit-policy.toml` and no authored
-  product code; tree shape alone never qualifies. Security, CI/git/release
-  bad-behavior, audit-lane, migration, input-boundary and agent-tool-supply
-  entries are never gated by it.
+- `helpers::tool_adoption_applicability` adds a docs-only exemption.
+  `target_stack = "docs"` plus no authored product code makes only
+  `coverage-evidence`, `rust-witness` and `proofmark-rust` not applicable, and
+  each one carries the reason `not applicable: docs-only (target_stack=docs, no
+  authored product code)`. Catalog `applicability` functions are unchanged, so
+  consumers that have not adopted the new function keep every check. Security,
+  supply-chain, authorization and release-integrity entries are never exempt.
 
 ### Changed
 

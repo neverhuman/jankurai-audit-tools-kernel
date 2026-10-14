@@ -29,6 +29,26 @@ prose: they live next to the code they govern and are reviewed on every audit.
      fails again.
    - `migration_path` — the concrete plan to remove the exception.
 
+## Docs-only stack declaration
+
+`target_stack = "docs"` in `agent/audit-policy.toml` is a stack declaration,
+not a waiver, and it cannot remove findings or caps. It takes effect only when
+the tree also has no authored product code; product code always overrides it.
+It can switch off exactly the tool-adoption entries listed in
+`helpers::DOCS_ONLY_EXEMPT_TOOL_IDS`, all of which only measure product code:
+
+- `coverage-evidence`: ingests product test-coverage reports.
+- `rust-witness`: witnesses runtime behaviour of product Rust code.
+- `proofmark-rust`: marks proof obligations on product Rust code.
+
+Each exempted entry is reported as `not applicable: docs-only
+(target_stack=docs, no authored product code)`, so a reviewer of any repository
+sees the opt-out. Security, supply-chain (SBOM/provenance), authorization
+(`authz-matrix`), CI/git/release bad-behavior, release readiness, migration,
+input-boundary, contract-drift and agent-tool-supply entries always keep their
+normal applicability. Anything beyond this list needs a real exception as
+described above.
+
 ## Example
 
 A reviewed `[[dead_language_allow]]` record is path-scoped, owned and expires:
