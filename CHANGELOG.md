@@ -8,6 +8,20 @@ version string lives in [`VERSION`](VERSION).
 
 ## [Unreleased]
 
+## [1.7.5] - 2026-10-14
+
+`VERSION` is `1.7.5-split.0`, the member version shipped in the 1.7.5 family
+release.
+
+### Changed
+
+- Public auditor identity is `1.7.5`. Standard `0.9.0` and schema `1.9.0` are
+  unchanged. A stored scan whose `last_full_auditor_version` differs from this
+  identity runs a full scan. No kernel behaviour changes: the 1.7.5 fix
+  (changed-fast control-file inventory) is in jankurai-core.
+- `agent/standard-version.toml` declares `auditor_version = "1.7.5"`, the
+  family auditor pin.
+
 ## [1.7.4] - 2026-10-14
 
 `VERSION` is `1.7.4-split.0`, the member version shipped in the 1.7.4 family
