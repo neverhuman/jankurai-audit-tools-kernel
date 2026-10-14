@@ -8,6 +8,11 @@ version string lives in [`VERSION`](VERSION).
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-10-14
+
+`VERSION` is `1.7.4-split.0`, the member version shipped in the 1.7.4 family
+release.
+
 ### Added
 
 - `helpers::tool_adoption_applicability` adds a docs-only exemption.
@@ -20,6 +25,9 @@ version string lives in [`VERSION`](VERSION).
 
 ### Changed
 
+- Public auditor identity is `1.7.4`. Standard `0.9.0` and schema `1.9.0` are
+  unchanged. A stored scan whose `last_full_auditor_version` differs from this
+  identity runs a full scan.
 - `HLT-001` dead-language exceptions can use reviewed, owned, expiring
   `[[dead_language_allow]]` records scoped to paths. A hit covered by an active
   record leaves `scan::future_hostile_hits` (no finding, no cap) and is returned
