@@ -140,32 +140,42 @@ pub fn has_authored_product_code(ctx: &AuditContext) -> bool {
     product_code_files(ctx).iter().any(|f| f.is_code)
 }
 
+/// `target_stack` declared in the inventoried `agent/audit-policy.toml`, read
+/// from `ctx.all_files` like every other predicate (no extra disk read). A
+/// missing or unparsable policy yields `None`, which never opts a repo out of
+/// any check.
 pub fn declared_target_stack(ctx: &AuditContext) -> Option<String> {
-    #[derive(Debug, Deserialize, Default)]
-    struct AuditPolicyFile {
-        target_stack: Option<String>,
-    }
-
-    std::fs::read_to_string(ctx.root.join("agent/audit-policy.toml"))
-        .ok()
-        .and_then(|text| toml::from_str::<AuditPolicyFile>(&text).ok())
-        .and_then(|policy| policy.target_stack)
-        .map(|stack| stack.trim().to_ascii_lowercase())
+    ctx.all_files
+        .iter()
+        .find(|f| f.rel_path == "agent/audit-policy.toml")
+        .and_then(|f| toml::from_str::<toml::Value>(&f.text).ok())
+        .and_then(|policy| {
+            policy
+                .get("target_stack")
+                .and_then(|stack| stack.as_str())
+                .map(|stack| stack.trim().to_ascii_lowercase())
+        })
         .filter(|stack| !stack.is_empty())
 }
 
+/// Pure declaration check: the policy says `target_stack = "docs"`. It says
+/// nothing about the tree; see [`docs_only_repo`] for the gate.
 pub fn declared_docs_target_stack(ctx: &AuditContext) -> bool {
-    declared_target_stack(ctx).as_deref() == Some("docs") && !has_authored_product_code(ctx)
+    declared_target_stack(ctx).as_deref() == Some("docs")
 }
 
-/// A repository with no authored adopter product code should not be scored down
-/// for product-only dimensions such as app tool replacement or runtime telemetry.
+/// Docs-only gate for product-only dimensions such as app tool replacement or
+/// runtime telemetry.
 ///
-/// `target_stack = "docs"` is an explicit opt-in, but the underlying shape is
-/// still validated against the tree: adding product code makes this return
-/// false, so the product dimensions come back into scope.
+/// Requires BOTH the explicit `target_stack = "docs"` opt-in AND no authored
+/// product code in the tree. Tree shape alone never qualifies: a repository
+/// whose code lives in `tools/`, `scripts/`, `migrations/` etc. without the
+/// opt-in keeps every check. Adding product code to an opted-in repository
+/// brings the product dimensions back. Security, supply-chain, git, CI,
+/// release-bad-behavior, audit-lane, migration, input-boundary and
+/// agent-tool-supply checks are never gated by this predicate.
 pub fn docs_only_repo(ctx: &AuditContext) -> bool {
-    !has_authored_product_code(ctx)
+    declared_docs_target_stack(ctx) && !has_authored_product_code(ctx)
 }
 
 pub fn docs_only_not_applicable_dimension(
@@ -196,8 +206,10 @@ pub fn docs_only_not_applicable_dimension(
     }
 }
 
+/// SBOM/provenance evidence applies to every repository except an opted-in
+/// docs-only one that also ships no release artifacts.
 pub fn security_sbom_provenance_applicable(ctx: &AuditContext) -> bool {
-    has_authored_product_code(ctx) || has_release_artifact_surface(ctx)
+    !docs_only_repo(ctx) || has_release_artifact_surface(ctx)
 }
 
 pub fn security_in_ci_audit_applicable(ctx: &AuditContext) -> bool {
@@ -307,7 +319,7 @@ pub const TOOL_ADOPTION_CATALOG: &[ToolAdoptionCatalogEntry] = &[
         local_command: "cargo test -p jankurai --test language_bad_behavior",
         ci_command: "cargo test -p jankurai --test language_bad_behavior",
         artifact_paths: &["target/jankurai/language-bad-behavior.log"],
-        applicability: tool_release_readiness_applicable,
+        applicability: tool_release_bad_behavior_applicable,
     },
     ToolAdoptionCatalogEntry {
         id: "ux-qa",
@@ -528,7 +540,7 @@ pub fn tool_adoption_ci_text(ctx: &AuditContext) -> String {
 }
 
 fn tool_audit_ci_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx) && is_high_risk_repo(ctx)
+    is_high_risk_repo(ctx)
 }
 
 fn tool_proof_routing_applicable(ctx: &AuditContext) -> bool {
@@ -536,14 +548,13 @@ fn tool_proof_routing_applicable(ctx: &AuditContext) -> bool {
 }
 
 fn tool_security_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx)
-        && (is_high_risk_repo(ctx)
-            || ctx.all_files.iter().any(|f| {
-                matches!(
-                    f.name.as_str(),
-                    "Cargo.toml" | "package.json" | "Cargo.lock" | "package-lock.json"
-                )
-            }))
+    is_high_risk_repo(ctx)
+        || ctx.all_files.iter().any(|f| {
+            matches!(
+                f.name.as_str(),
+                "Cargo.toml" | "package.json" | "Cargo.lock" | "package-lock.json"
+            )
+        })
 }
 
 fn tool_ux_qa_applicable(ctx: &AuditContext) -> bool {
@@ -551,11 +562,10 @@ fn tool_ux_qa_applicable(ctx: &AuditContext) -> bool {
 }
 
 fn tool_db_migration_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx)
-        && ctx.all_files.iter().any(|f| {
-            (f.rel_path.starts_with("db/migrations/") || f.rel_path.starts_with("migrations/"))
-                && f.suffix == ".sql"
-        })
+    ctx.all_files.iter().any(|f| {
+        (f.rel_path.starts_with("db/migrations/") || f.rel_path.starts_with("migrations/"))
+            && f.suffix == ".sql"
+    })
 }
 
 fn tool_contract_drift_applicable(ctx: &AuditContext) -> bool {
@@ -606,34 +616,37 @@ fn tool_authz_matrix_applicable(ctx: &AuditContext) -> bool {
 }
 
 fn tool_input_boundary_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx)
-        && product_code_files(ctx).iter().any(|f| {
-            let lower = f.text.to_ascii_lowercase();
-            lower.contains("eval(")
-                || lower.contains("exec(")
-                || lower.contains("fetch(")
-                || lower.contains("innerhtml")
-                || lower.contains("select * from")
-        })
+    product_code_files(ctx).iter().any(|f| {
+        let lower = f.text.to_ascii_lowercase();
+        lower.contains("eval(")
+            || lower.contains("exec(")
+            || lower.contains("fetch(")
+            || lower.contains("innerhtml")
+            || lower.contains("select * from")
+    })
 }
 
 fn tool_agent_tool_supply_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx)
-        && ctx.all_files.iter().any(|f| {
-            f.rel_path.starts_with("agent/")
-                || f.rel_path.starts_with(".agents/")
-                || f.rel_path.starts_with(".cursor/")
-        })
+    ctx.all_files.iter().any(|f| {
+        f.rel_path.starts_with("agent/")
+            || f.rel_path.starts_with(".agents/")
+            || f.rel_path.starts_with(".cursor/")
+    })
 }
 
 fn tool_release_readiness_applicable(ctx: &AuditContext) -> bool {
-    !docs_only_repo(ctx)
-        && ctx.all_files.iter().any(|f| {
-            prose::allows_word_scan(f) && {
-                let lower = f.text.to_ascii_lowercase();
-                lower.contains("release") || lower.contains("launch") || lower.contains("rollback")
-            }
-        })
+    !docs_only_repo(ctx) && tool_release_bad_behavior_applicable(ctx)
+}
+
+/// Release bad-behavior review guards tags and artifacts, so it is never
+/// switched off by the docs-only gate.
+fn tool_release_bad_behavior_applicable(ctx: &AuditContext) -> bool {
+    ctx.all_files.iter().any(|f| {
+        prose::allows_word_scan(f) && {
+            let lower = f.text.to_ascii_lowercase();
+            lower.contains("release") || lower.contains("launch") || lower.contains("rollback")
+        }
+    })
 }
 
 fn tool_cost_budget_applicable(ctx: &AuditContext) -> bool {

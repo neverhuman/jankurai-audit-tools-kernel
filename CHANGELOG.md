@@ -8,6 +8,15 @@ version string lives in [`VERSION`](VERSION).
 
 ## [Unreleased]
 
+### Added
+
+- `helpers::docs_only_repo` gates product-only tool-adoption entries and the
+  `docs_only_not_applicable_dimension` helper. It requires the explicit
+  `target_stack = "docs"` opt-in in `agent/audit-policy.toml` and no authored
+  product code; tree shape alone never qualifies. Security, CI/git/release
+  bad-behavior, audit-lane, migration, input-boundary and agent-tool-supply
+  entries are never gated by it.
+
 ### Changed
 
 - `HLT-001` dead-language exceptions can use reviewed, owned, expiring
