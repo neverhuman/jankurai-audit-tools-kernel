@@ -108,13 +108,14 @@ pub enum DeadLanguageAllowanceMatch {
 
 impl DeadLanguageAllowance {
     fn matches(&self, term: &str, path: &str) -> bool {
+        // Stored paths are normalized without a trailing `/`, so a directory
+        // scope covers exactly `allowed` itself and anything below `allowed/`.
         self.term == term
             && (self.paths.is_empty()
-                || self.paths.iter().any(|allowed| {
-                    path == allowed
-                        || allowed.ends_with('/') && path.starts_with(allowed)
-                        || path.starts_with(&format!("{allowed}/"))
-                }))
+                || self
+                    .paths
+                    .iter()
+                    .any(|allowed| path == allowed || path.starts_with(&format!("{allowed}/"))))
     }
 
     pub fn report_label(&self) -> String {
@@ -122,7 +123,9 @@ impl DeadLanguageAllowance {
     }
 }
 
-pub fn dead_language_allowances(root: &Path, _today: NaiveDate) -> Vec<DeadLanguageAllowance> {
+/// Parse every `[[dead_language_allow]]` record. Expiry and completeness are
+/// judged per hit by [`matching_dead_language_allowance`], not here.
+pub fn dead_language_allowances(root: &Path) -> Vec<DeadLanguageAllowance> {
     std::fs::read_to_string(root.join("agent/audit-policy.toml"))
         .ok()
         .map(|text| parse_dead_language_allowances(&text))
@@ -135,6 +138,8 @@ pub fn matching_dead_language_allowance(
     term: &str,
     today: NaiveDate,
 ) -> Option<DeadLanguageAllowanceMatch> {
+    // Prefer an active record over an expired or incomplete one so a renewed
+    // record covers the hit regardless of declaration order in the policy file.
     allowances
         .iter()
         .filter(|allowance| allowance.matches(term, path))
@@ -147,7 +152,29 @@ pub fn matching_dead_language_allowance(
                 DeadLanguageAllowanceMatch::Expired(allowance.clone())
             }
         })
-        .next()
+        .min_by_key(DeadLanguageAllowanceMatch::precedence)
+}
+
+impl DeadLanguageAllowanceMatch {
+    /// Lower is preferred when several records match one hit.
+    fn precedence(&self) -> u8 {
+        match self {
+            Self::Active(_) => 0,
+            Self::Expired(_) => 1,
+            Self::Incomplete(_) => 2,
+        }
+    }
+
+    /// Only an active, complete, unexpired record keeps a hit out of the cap.
+    pub fn covers(&self) -> bool {
+        matches!(self, Self::Active(_))
+    }
+
+    pub fn record(&self) -> &DeadLanguageAllowance {
+        match self {
+            Self::Active(record) | Self::Expired(record) | Self::Incomplete(record) => record,
+        }
+    }
 }
 
 fn parse_dead_language_allowances(text: &str) -> Vec<DeadLanguageAllowance> {
@@ -398,6 +425,66 @@ reason = "Needs an owner."
             incomplete,
             Some(DeadLanguageAllowanceMatch::Incomplete(_))
         ));
+    }
+
+    #[test]
+    fn active_record_wins_over_earlier_expired_or_incomplete_records() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 11).unwrap();
+        let policy = r#"
+[[dead_language_allow]]
+name = "old-expired"
+term = "todo"
+paths = ["infra/iam"]
+owner = "platform"
+expires = "2026-01-01"
+reason = "Kept for history."
+
+[[dead_language_allow]]
+name = "draft-missing-owner"
+term = "todo"
+paths = ["infra"]
+expires = "2099-12-31"
+reason = "Overlapping draft."
+
+[[dead_language_allow]]
+name = "renewed"
+term = "todo"
+paths = ["infra/iam/"]
+owner = "platform"
+expires = "2026-12-31"
+reason = "Renewed after review."
+"#;
+        let allowances = parse_dead_language_allowances(policy);
+        let matched =
+            matching_dead_language_allowance(&allowances, "infra/iam/grants.tf", "todo", today)
+                .expect("renewed record matches");
+        assert!(matched.covers());
+        assert_eq!(matched.record().name, "renewed");
+    }
+
+    #[test]
+    fn directory_scope_does_not_cover_sibling_prefixes() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 11).unwrap();
+        let policy = r#"
+[[dead_language_allow]]
+name = "iam"
+term = "todo"
+paths = ["infra/iam/"]
+owner = "platform"
+expires = "2026-12-31"
+reason = "Scoped."
+"#;
+        let allowances = parse_dead_language_allowances(policy);
+        assert!(
+            matching_dead_language_allowance(&allowances, "infra/iam", "todo", today).is_some()
+        );
+        assert!(matching_dead_language_allowance(
+            &allowances,
+            "infra/iam-extra/a.tf",
+            "todo",
+            today
+        )
+        .is_none());
     }
 }
 

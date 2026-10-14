@@ -10,10 +10,15 @@ version string lives in [`VERSION`](VERSION).
 
 ### Changed
 
-- `HLT-001` dead-language exceptions now use reviewed, owned, expiring
-  `[[dead_language_allow]]` records scoped to paths. Covered hits stay visible
-  with owner, expiry and reason while leaving the cap; outside-scope, expired
-  or incomplete records count again and name the record to renew.
+- `HLT-001` dead-language exceptions can use reviewed, owned, expiring
+  `[[dead_language_allow]]` records scoped to paths. A hit covered by an active
+  record leaves `scan::future_hostile_hits` (no finding, no cap) and is returned
+  by `scan::future_hostile_covered_hits` for reporting; outside-scope, expired
+  or incomplete records count again and name the record to renew. Cap
+  membership comes from the typed match, `scan::future_hostile_scan_at` takes
+  the evaluation date, and an active record wins over expired or incomplete
+  ones. The legacy `[dead_language] allow_terms` table is still read, and this
+  repository's policy keeps it until a released auditor reads the records.
 
 ## [1.7.3] - 2026-10-07
 

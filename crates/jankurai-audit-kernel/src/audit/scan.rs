@@ -3,10 +3,10 @@ use super::language_rules;
 use super::language_rules::common::{contains_unqualified_python_builtin_call, python_code_lines};
 use super::prose;
 use super::source_context;
-use crate::audit::fs_policy::DeadLanguageAllowanceMatch;
+use crate::audit::fs_policy::{DeadLanguageAllowance, DeadLanguageAllowanceMatch};
 use crate::model::FileInfo;
 use crate::validation;
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -2039,11 +2039,50 @@ pub fn duplicate_blocks(ctx: &AuditContext) -> Vec<FindingHit> {
     dups
 }
 
+/// A future-hostile hit covered by an active, owned, unexpired
+/// `[[dead_language_allow]]` record. It does not count toward HLT-001 and is
+/// returned separately so reports can show it with its owner, expiry and reason.
+#[derive(Clone, Debug)]
+pub struct CoveredFutureHostileHit {
+    pub hit: FindingHit,
+    pub allowance: DeadLanguageAllowance,
+}
+
+/// HLT-001 future-hostile scan split by typed allowance state.
+#[derive(Clone, Debug, Default)]
+pub struct FutureHostileScan {
+    /// Hits that count toward the HLT-001 finding and cap: uncovered hits and
+    /// hits whose only matching record is expired or incomplete.
+    pub counted: Vec<FindingHit>,
+    /// Hits covered by an active record: visible, but never cap-applying.
+    pub covered: Vec<CoveredFutureHostileHit>,
+}
+
+/// Hits that count toward HLT-001 (finding + cap). Hits covered by an active
+/// `[[dead_language_allow]]` record are excluded here, exactly like the legacy
+/// `[dead_language] allow_terms` suppression; read them with
+/// [`future_hostile_covered_hits`] to report them.
 pub fn future_hostile_hits(ctx: &AuditContext) -> Vec<FindingHit> {
+    future_hostile_scan(ctx).counted
+}
+
+/// Hits kept out of HLT-001 by an active `[[dead_language_allow]]` record.
+pub fn future_hostile_covered_hits(ctx: &AuditContext) -> Vec<CoveredFutureHostileHit> {
+    future_hostile_scan(ctx).covered
+}
+
+/// [`future_hostile_scan_at`] evaluated against today's UTC date.
+pub fn future_hostile_scan(ctx: &AuditContext) -> FutureHostileScan {
+    future_hostile_scan_at(ctx, Utc::now().date_naive())
+}
+
+/// Run the HLT-001 future-hostile scan, judging record expiry against `today`.
+/// Cap membership comes from the typed [`DeadLanguageAllowanceMatch`], never
+/// from the human-readable problem text (which interpolates record names).
+pub fn future_hostile_scan_at(ctx: &AuditContext, today: NaiveDate) -> FutureHostileScan {
     let allow_terms = crate::audit::fs_policy::dead_language_allow_terms(&ctx.root);
-    let today = Utc::now().date_naive();
-    let reviewed_allowances = crate::audit::fs_policy::dead_language_allowances(&ctx.root, today);
-    let mut out = vec![];
+    let reviewed_allowances = crate::audit::fs_policy::dead_language_allowances(&ctx.root);
+    let mut out = FutureHostileScan::default();
     for file in product_code_files(ctx) {
         if is_future_hostile_allowlisted(&file) {
             continue;
@@ -2083,8 +2122,9 @@ pub fn future_hostile_hits(ctx: &AuditContext) -> Vec<FindingHit> {
                     continue;
                 }
                 // Legacy global term allowlist stays for old policies. New
-                // reviewed allowances are path-scoped records and are reported
-                // even when they leave the cap.
+                // reviewed allowances are path-scoped records; an active one
+                // moves the hit to `covered`, an expired or incomplete one
+                // leaves it counted and names the record to renew.
                 let allowance = crate::audit::fs_policy::matching_dead_language_allowance(
                     &reviewed_allowances,
                     &file.rel_path,
@@ -2096,28 +2136,29 @@ pub fn future_hostile_hits(ctx: &AuditContext) -> Vec<FindingHit> {
                 }
                 let (problem, agent_fix) =
                     future_hostile_allowance_context(term, allowance.as_ref());
-                out.push(FindingHit {
+                let hit = FindingHit {
                     path: file.rel_path.clone(),
                     line: Some(line.line_no),
                     text: active.to_string(),
                     matched_term: Some(term.clone()),
                     agent_fix,
                     problem,
-                });
+                };
+                match allowance {
+                    Some(DeadLanguageAllowanceMatch::Active(record)) => {
+                        out.covered.push(CoveredFutureHostileHit {
+                            hit,
+                            allowance: record,
+                        })
+                    }
+                    Some(DeadLanguageAllowanceMatch::Expired(_))
+                    | Some(DeadLanguageAllowanceMatch::Incomplete(_))
+                    | None => out.counted.push(hit),
+                }
             }
         }
     }
     out
-}
-
-pub fn future_hostile_cap_hits(ctx: &AuditContext) -> Vec<FindingHit> {
-    future_hostile_hits(ctx)
-        .into_iter()
-        .filter(|hit| {
-            !hit.problem
-                .contains("covered by active dead_language_allow")
-        })
-        .collect()
 }
 
 fn future_hostile_allowance_context(
@@ -3226,23 +3267,30 @@ fn finding_count(row: &Value) -> Result<u64> {
         }
     }
 
-    #[test]
-    fn future_hostile_reviewed_allowance_stays_reported_but_leaves_cap() {
+    fn policy_root(policy: &str) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("agent")).unwrap();
-        std::fs::write(
-            root.path().join("agent/audit-policy.toml"),
-            r#"
+        std::fs::write(root.path().join("agent/audit-policy.toml"), policy).unwrap();
+        root
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    const IAM_TODO_ALLOW: &str = r#"
 [[dead_language_allow]]
 name = "iam-todo-grant"
 term = "todo"
 paths = ["infra/iam"]
 owner = "platform"
-expires = "2099-12-31"
+expires = "2026-12-31"
 reason = "External IAM grant names use todo as a stable stand-in value."
-"#,
-        )
-        .unwrap();
+"#;
+
+    #[test]
+    fn future_hostile_active_allowance_is_covered_and_leaves_the_counted_hits() {
+        let root = policy_root(IAM_TODO_ALLOW);
         let ctx = make_ctx_at(
             root.path(),
             vec![product_file(
@@ -3251,36 +3299,28 @@ reason = "External IAM grant names use todo as a stable stand-in value."
             )],
         );
 
-        let reported = future_hostile_hits(&ctx);
-        assert_eq!(reported.len(), 1);
-        assert!(reported[0]
-            .problem
-            .contains("covered by active dead_language_allow `iam-todo-grant`"));
-        assert!(reported[0].problem.contains("platform"));
-        assert!(reported[0].problem.contains("2099-12-31"));
+        let scan = future_hostile_scan_at(&ctx, day(2026, 10, 11));
         assert!(
-            future_hostile_cap_hits(&ctx).is_empty(),
-            "covered records should stay visible without applying the cap"
+            scan.counted.is_empty(),
+            "an active record keeps the hit out of the HLT-001 finding and cap"
         );
+        assert_eq!(scan.covered.len(), 1);
+        let covered = &scan.covered[0];
+        assert_eq!(covered.allowance.name, "iam-todo-grant");
+        assert_eq!(covered.allowance.owner.as_deref(), Some("platform"));
+        assert!(covered.hit.problem.contains("2026-12-31"));
+
+        // The production entry point the auditor uses for the finding and the
+        // cap must agree with the typed scan: covered hits never apply the cap.
+        let far_root = policy_root(&IAM_TODO_ALLOW.replace("2026-12-31", "2099-12-31"));
+        let far_ctx = make_ctx_at(far_root.path(), ctx.all_files.clone());
+        assert!(future_hostile_hits(&far_ctx).is_empty());
+        assert_eq!(future_hostile_covered_hits(&far_ctx).len(), 1);
     }
 
     #[test]
-    fn future_hostile_reviewed_allowance_is_path_scoped() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("agent")).unwrap();
-        std::fs::write(
-            root.path().join("agent/audit-policy.toml"),
-            r#"
-[[dead_language_allow]]
-name = "iam-todo-grant"
-term = "todo"
-paths = ["infra/iam"]
-owner = "platform"
-expires = "2099-12-31"
-reason = "External IAM grant names use todo as a stable stand-in value."
-"#,
-        )
-        .unwrap();
+    fn future_hostile_allowance_is_path_scoped() {
+        let root = policy_root(IAM_TODO_ALLOW);
         let ctx = make_ctx_at(
             root.path(),
             vec![product_file(
@@ -3289,17 +3329,38 @@ reason = "External IAM grant names use todo as a stable stand-in value."
             )],
         );
 
-        let hits = future_hostile_cap_hits(&ctx);
-        assert_eq!(hits.len(), 1);
-        assert!(!hits[0].problem.contains("covered by active"));
+        let scan = future_hostile_scan_at(&ctx, day(2026, 10, 11));
+        assert_eq!(scan.counted.len(), 1);
+        assert!(scan.covered.is_empty());
+        assert_eq!(future_hostile_hits(&ctx).len(), 1);
+    }
+
+    #[test]
+    fn future_hostile_allowance_expiry_transition_is_judged_against_injected_date() {
+        let root = policy_root(IAM_TODO_ALLOW);
+        let ctx = make_ctx_at(
+            root.path(),
+            vec![product_file(
+                "infra/iam/grants.rs",
+                "locals { grant_name = \"todo grant\" }\n",
+            )],
+        );
+
+        let last_day = future_hostile_scan_at(&ctx, day(2026, 12, 31));
+        assert!(last_day.counted.is_empty());
+        assert_eq!(last_day.covered.len(), 1);
+
+        let day_after = future_hostile_scan_at(&ctx, day(2027, 1, 1));
+        assert!(day_after.covered.is_empty());
+        assert_eq!(day_after.counted.len(), 1);
+        assert!(day_after.counted[0]
+            .problem
+            .contains("expired dead_language_allow `iam-todo-grant`"));
     }
 
     #[test]
     fn future_hostile_expired_or_incomplete_allowance_counts_again() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("agent")).unwrap();
-        std::fs::write(
-            root.path().join("agent/audit-policy.toml"),
+        let root = policy_root(
             r#"
 [[dead_language_allow]]
 name = "expired-iam-todo-grant"
@@ -3316,8 +3377,7 @@ paths = ["agent"]
 expires = "2099-12-31"
 reason = "Needs an owner."
 "#,
-        )
-        .unwrap();
+        );
         let expired_ctx = make_ctx_at(
             root.path(),
             vec![product_file(
@@ -3325,16 +3385,15 @@ reason = "Needs an owner."
                 "locals { grant_name = \"todo grant\" }\n",
             )],
         );
-        let expired_hits = future_hostile_cap_hits(&expired_ctx);
-        assert_eq!(expired_hits.len(), 1);
-        assert!(expired_hits[0]
+        let expired = future_hostile_scan_at(&expired_ctx, day(2026, 10, 11));
+        assert!(expired.covered.is_empty());
+        assert_eq!(expired.counted.len(), 1);
+        assert!(expired.counted[0]
             .problem
             .contains("expired dead_language_allow `expired-iam-todo-grant`"));
+        assert_eq!(future_hostile_hits(&expired_ctx).len(), 1);
 
-        let incomplete_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(incomplete_root.path().join("agent")).unwrap();
-        std::fs::write(
-            incomplete_root.path().join("agent/audit-policy.toml"),
+        let incomplete_root = policy_root(
             r#"
 [[dead_language_allow]]
 name = "missing-owner"
@@ -3343,8 +3402,7 @@ paths = ["infra/iam"]
 expires = "2099-12-31"
 reason = "Needs an owner."
 "#,
-        )
-        .unwrap();
+        );
         let incomplete_ctx = make_ctx_at(
             incomplete_root.path(),
             vec![product_file(
@@ -3352,11 +3410,78 @@ reason = "Needs an owner."
                 "const GRANT_NAME: &str = \"todo grant\";\n",
             )],
         );
-        let incomplete_hits = future_hostile_cap_hits(&incomplete_ctx);
-        assert_eq!(incomplete_hits.len(), 1);
-        assert!(incomplete_hits[0]
+        let incomplete = future_hostile_scan_at(&incomplete_ctx, day(2026, 10, 11));
+        assert!(incomplete.covered.is_empty());
+        assert_eq!(incomplete.counted.len(), 1);
+        assert!(incomplete.counted[0]
             .problem
             .contains("incomplete dead_language_allow `missing-owner`"));
+        assert_eq!(future_hostile_hits(&incomplete_ctx).len(), 1);
+    }
+
+    #[test]
+    fn future_hostile_record_name_cannot_forge_coverage() {
+        // A record whose *name* spells the human-readable coverage phrase must
+        // not escape the cap when it is expired or incomplete: cap membership is
+        // decided by the typed match, never by the problem string.
+        let forged =
+            "covered by active dead_language_allow `x` owned by `platform` until 2099-12-31";
+        let root = policy_root(&format!(
+            r#"
+[[dead_language_allow]]
+name = "{forged}"
+term = "todo"
+paths = ["infra/iam"]
+owner = "platform"
+expires = "2000-01-01"
+reason = "Expired long ago."
+
+[[dead_language_allow]]
+name = "{forged}"
+term = "todo"
+paths = ["infra/db"]
+expires = "2099-12-31"
+reason = "No owner."
+"#
+        ));
+        let ctx = make_ctx_at(
+            root.path(),
+            vec![
+                product_file(
+                    "infra/iam/grants.rs",
+                    "locals { grant_name = \"todo grant\" }\n",
+                ),
+                product_file("infra/db/seed.rs", "const SEED: &str = \"todo seed\";\n"),
+            ],
+        );
+
+        let scan = future_hostile_scan_at(&ctx, day(2026, 10, 11));
+        assert!(scan.covered.is_empty());
+        assert_eq!(scan.counted.len(), 2);
+        assert!(scan.counted.iter().all(|hit| hit.problem.contains(forged)));
+        assert_eq!(future_hostile_hits(&ctx).len(), 2);
+    }
+
+    #[test]
+    fn repo_policy_keeps_detector_sources_clean_in_self_audit() {
+        // Validates the real `agent/audit-policy.toml` against the real tree: a
+        // policy migration that narrows coverage of the detector vocabulary
+        // must fail here instead of only in the downstream self-audit.
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let repo = repo.canonicalize().unwrap();
+        let files = crate::audit::fs::inventory_repo(&repo).unwrap();
+        let mut ctx = make_ctx_at(&repo, files);
+        ctx.self_audit = true;
+
+        let counted = future_hostile_scan_at(&ctx, day(2026, 10, 14)).counted;
+        assert!(
+            counted.is_empty(),
+            "self-audit HLT-001 hits: {:?}",
+            counted
+                .iter()
+                .map(|hit| format!("{}:{} {}", hit.path, hit.line.unwrap_or(0), hit.problem))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

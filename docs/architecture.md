@@ -38,7 +38,7 @@ carry the literal marker strings (for example `unsafe`, `transmute`,
 repositories. These markers are pattern data, not live hazardous usage. The
 upstream `jankurai` auditor excludes its own detector crates from the
 product-code scan; in this extracted repo the same intent is expressed through
-`agent/audit-policy.toml` (`[[dead_language_allow]]`) and the boundary and
+`agent/audit-policy.toml` (`[dead_language] allow_terms`) and the boundary and
 exception manifests under `agent/`.
 
 ## Ownership and proof routing

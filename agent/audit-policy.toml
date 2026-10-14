@@ -55,18 +55,13 @@ design_doc_hard = 600
 [scan]
 excluded_paths = [".fusion", ".jankurai", ".cargo", "target", "node_modules"]
 
-[[dead_language_allow]]
-name = "audit-kernel-detector-terms"
-terms = [
+[dead_language]
+allow_terms = [
   "placeholder", "todo", "temporary", "stub", "legacy", "fallback", "dummy",
   "best effort", "workaround", "stale", "hack", "fixme", "deprecated", "unused",
   "temp", "shim", "remove later", "old", "obsolete", "depricated", "dead code",
   "compat", "cleanup later", "backcompat",
 ]
-paths = ["crates/jankurai-audit-kernel/src/audit/scan.rs"]
-owner = "tools"
-expires = "2026-12-31"
-reason = "HLT-001 detector source deliberately stores the future-hostile marker vocabulary it scans for."
 
 [variety]
 min_instance = 2

@@ -19,8 +19,9 @@ prose: they live next to the code they govern and are reviewed on every audit.
    reclassifications use `agent/boundaries.toml`; for streaming runtimes use the
    `[[streaming_exception]]` block; for security policy use
    `agent/security-policy.toml`; for dead-language marker words that are
-   load-bearing detector patterns use a `[[dead_language_allow]]` record in
-   `agent/audit-policy.toml`.
+   load-bearing patterns use a `[[dead_language_allow]]` record in
+   `agent/audit-policy.toml` (the legacy repo-wide `[dead_language]
+   allow_terms` table is still read for old policies).
 3. Every exception entry MUST carry:
    - `owner` — the team or person accountable.
    - `classification` — e.g. `brownfield`, `temporary`, `vendor`.
@@ -30,23 +31,30 @@ prose: they live next to the code they govern and are reviewed on every audit.
 
 ## Example
 
-The kernel's HLT-001 detector source carries future-hostile marker strings as
-detection patterns. The reviewed exception is path-scoped and expires:
+A reviewed `[[dead_language_allow]]` record is path-scoped, owned and expires:
 
 ```toml
 [[dead_language_allow]]
-name = "audit-kernel-detector-terms"
-terms = ["todo", "legacy", "fallback"]
-paths = ["crates/jankurai-audit-kernel/src/audit/scan.rs"]
-owner = "tools"
+name = "iam-todo-grant"
+terms = ["todo"]
+paths = ["infra/iam"]
+owner = "platform"
 expires = "2026-12-31"
-reason = "HLT-001 detector source deliberately stores the marker vocabulary it scans for."
+reason = "External IAM grant names use todo as a stable stand-in value."
 ```
 
-A covered hit remains visible in the audit report with the owner, expiry and
-reason, but it does not apply the HLT-001 cap. A hit outside `paths`, or one
-covered only by an expired or incomplete record, counts again and names the
-record to renew.
+A hit covered by an active record does not count toward HLT-001 (no finding, no
+cap); the kernel returns it from `scan::future_hostile_covered_hits` with the
+record's owner, expiry and reason so a report can show it. A hit outside
+`paths`, or one matched only by an expired or incomplete record, counts again
+and names the record to renew. When several records match, an active one wins
+regardless of order in the file.
+
+This repository's own detector vocabulary still uses the legacy
+`[dead_language] allow_terms` table, because released auditors (1.7.3 and
+earlier) read only that table. It moves to reviewed records, covering every
+detector module under `crates/jankurai-audit-kernel/src/audit/`, once a
+released auditor carries the record reader.
 
 Streaming exceptions use the same owned, dated pattern and are recorded in
 [`agent/boundaries.toml`](../agent/boundaries.toml):

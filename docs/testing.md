@@ -63,7 +63,7 @@ The kernel modules under `crates/jankurai-audit-kernel/src/audit` are detector
 definitions. They contain the literal marker strings the auditor searches for.
 When the auditor scans this repo, those markers can look like product-code
 hazards even though they are pattern data. The policy in
-`agent/audit-policy.toml` (`[[dead_language_allow]]`) and the boundary and
+`agent/audit-policy.toml` (`[dead_language] allow_terms`) and the boundary and
 exception manifests under `agent/` keep the detector source from being misread.
 See `docs/boundaries.md` and `docs/exceptions.md`.
 
