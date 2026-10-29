@@ -48,6 +48,14 @@ fn fast_lane_stays_the_quick_subset() {
 
 #[test]
 fn ci_local_routes_required_to_the_lane_script() {
-    let runner = fs::read_to_string(repo_root().join("scripts/ci-local.sh")).unwrap();
-    assert!(runner.contains("required) bash ops/ci/required.sh"));
+    let output = std::process::Command::new("bash")
+        .args(["scripts/ci-local.sh", "--which", "required"])
+        .current_dir(repo_root())
+        .output()
+        .expect("probe the CI dispatcher's required lane");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "ops/ci/required.sh"
+    );
 }
