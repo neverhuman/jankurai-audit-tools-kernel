@@ -21,6 +21,29 @@ is cut from the commits since the previous release, using commit subjects and
 `Todo:` trailers. At release time, promote the `Unreleased` section to a dated
 version heading under the new `VERSION` and extract the release slice.
 
+The release preparer runs this command before creating the release PR. Set
+`PREVIOUS_RELEASE_TAG` to the last published release tag; `VERSION` must already
+name the candidate version:
+
+```sh
+: "${PREVIOUS_RELEASE_TAG:?set the previous published release tag}"
+git rev-parse --verify "refs/tags/$PREVIOUS_RELEASE_TAG^{commit}"
+git merge-base --is-ancestor "$PREVIOUS_RELEASE_TAG" HEAD
+version=$(cat VERSION)
+mkdir -p target/release-notes
+{
+  printf '## %s\n\n' "$version"
+  git log --reverse --no-merges --format='- %s%n%(trailers:key=Todo)' "$PREVIOUS_RELEASE_TAG..HEAD"
+} > "target/release-notes/$version.md"
+```
+
+Review that generated file for compatibility changes and rollback commits, then
+insert the version block into `CHANGELOG.md` in the release PR. Preserve all
+historical entries and carry existing pending `Unreleased` notes into the
+release they describe. The command above performs generation; publication does
+not invoke an implicit generator. Record rollback details in the revert commit
+so the same command includes them in the next release.
+
 ## Release automation
 
 Releases are cut by CI, not by hand. GitHub is a publishing mirror only: CI
