@@ -16,10 +16,6 @@ install: setup
 
 bootstrap: setup
 
-# Required lane: the merge gate. Builds, lints and tests offline against the lock.
-required:
-    bash ops/ci/required.sh
-
 # Deterministic fast lane: the narrowest proof loop for agent iteration.
 fast:
     cargo check --workspace --locked

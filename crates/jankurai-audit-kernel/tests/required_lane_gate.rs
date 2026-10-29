@@ -59,3 +59,20 @@ fn ci_local_routes_required_to_the_lane_script() {
         "ops/ci/required.sh"
     );
 }
+
+#[test]
+fn hosted_required_recipe_is_unique_and_routes_through_ci_local() {
+    let output = std::process::Command::new("just")
+        .args(["--show", "required"])
+        .current_dir(repo_root())
+        .output()
+        .expect("resolve the hosted required recipe");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("bash scripts/ci-local.sh required"));
+}
