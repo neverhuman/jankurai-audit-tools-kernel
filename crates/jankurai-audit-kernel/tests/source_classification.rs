@@ -314,3 +314,29 @@ fn write(root: &Path, path: &str, contents: &str) {
     disk::create_dir_all(full.parent().unwrap()).unwrap();
     disk::write(full, contents).unwrap();
 }
+
+#[test]
+fn operational_python_is_not_product_truth_but_remains_scannable() {
+    for path in [
+        "scripts/notes.py",
+        "scripts/notes-test.py",
+        "ops/check.py",
+        "tools/check.py",
+    ] {
+        let ctx = context(inventory(path, "value = eval(input())\n"));
+        assert!(helpers::bad_python_path_hits(&ctx).is_empty(), "{path}");
+        assert_eq!(ctx.all_files.len(), 1);
+        assert!(
+            jankurai_audit_kernel::audit::language_rules::python::summary(&ctx).hard_findings > 0,
+            "operational code still needs security checks: {path}"
+        );
+    }
+    for path in [
+        "src/notes.py",
+        "python/service.py",
+        "scripts_service/main.py",
+    ] {
+        let ctx = context(inventory(path, "value = 1\n"));
+        assert_eq!(helpers::bad_python_path_hits(&ctx).len(), 1, "{path}");
+    }
+}
