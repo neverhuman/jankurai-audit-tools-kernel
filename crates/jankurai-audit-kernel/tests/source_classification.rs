@@ -315,28 +315,55 @@ fn write(root: &Path, path: &str, contents: &str) {
     disk::write(full, contents).unwrap();
 }
 
+// Product-surface classification is not an exemption from HLT-005. In
+// particular durable-data Python must remain visible in downstream/self audits.
 #[test]
-fn operational_python_is_not_product_truth_but_remains_scannable() {
-    for path in [
-        "scripts/notes.py",
-        "scripts/notes-test.py",
-        "ops/check.py",
-        "tools/check.py",
-    ] {
-        let ctx = context(inventory(path, "value = eval(input())\n"));
-        assert!(helpers::bad_python_path_hits(&ctx).is_empty(), "{path}");
-        assert_eq!(ctx.all_files.len(), 1);
-        assert!(
-            jankurai_audit_kernel::audit::language_rules::python::summary(&ctx).hard_findings > 0,
-            "operational code still needs security checks: {path}"
-        );
+fn python_truth_checks_require_explicit_boundary_exemptions() {
+    for self_audit in [false, true] {
+        for path in [
+            "scripts/notes.py",
+            "ops/check.py",
+            "tools/check.py",
+            "db/reconcile.py",
+            "migrations/0002_backfill.py",
+            "contracts/update.py",
+            "src/spec/service.py",
+            "src/service.py",
+            "python/service.py",
+            "scripts_service/main.py",
+            "schemas/update.py",
+            "agent/check.py",
+        ] {
+            let mut ctx = context(inventory(path, "import psycopg\nvalue = eval(input())\n"));
+            ctx.self_audit = self_audit;
+            assert_eq!(
+                helpers::bad_python_path_hits(&ctx).len(),
+                1,
+                "{path}, self={self_audit}"
+            );
+            assert!(
+                jankurai_audit_kernel::audit::language_rules::python::summary(&ctx).hard_findings
+                    > 0
+            );
+        }
     }
-    for path in [
-        "src/notes.py",
-        "python/service.py",
-        "scripts_service/main.py",
-    ] {
-        let ctx = context(inventory(path, "value = 1\n"));
-        assert_eq!(helpers::bad_python_path_hits(&ctx).len(), 1, "{path}");
+}
+
+#[test]
+fn non_product_python_uses_declared_boundary_not_global_directory_exemptions() {
+    let mut f = fixture(&[
+        ("agent/boundaries.toml", "[stack]\nid = \"rust-ts-vite-react-postgres-bounded-python\"\nversion = \"0.5.0\"\n[python]\nallowed_non_product_paths = [\"scripts/\"]\n"),
+        ("scripts/notes.py", "import subprocess\n"),
+        ("scripts_service/main.py", "import psycopg\n"),
+        ("db/reconcile.py", "import psycopg\n"),
+    ]);
+    for self_audit in [false, true] {
+        f.ctx.self_audit = self_audit;
+        let hits = helpers::bad_python_path_hits(&f.ctx);
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().any(|hit| hit.rel_path == "db/reconcile.py"));
+        assert!(hits
+            .iter()
+            .any(|hit| hit.rel_path == "scripts_service/main.py"));
     }
 }

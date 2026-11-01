@@ -1059,7 +1059,6 @@ pub fn bad_python_path_hits(ctx: &AuditContext) -> Vec<FileInfo> {
         .iter()
         .filter(|f| {
             f.suffix == ".py"
-                && is_runtime_stack_surface(f, ctx.self_audit)
                 && !python_scoring_exempt(ctx, &f.rel_path)
                 && !f.rel_path.contains("/tests/fixtures/")
                 && !f.rel_path.starts_with("tests/fixtures/")
