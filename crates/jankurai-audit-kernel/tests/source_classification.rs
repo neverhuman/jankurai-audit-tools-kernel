@@ -333,6 +333,10 @@ fn python_truth_checks_require_explicit_boundary_exemptions() {
             "scripts_service/main.py",
             "schemas/update.py",
             "agent/check.py",
+            // Prefixes whose runtime-surface classification flips with self_audit.
+            "crates/jankurai-audit-kernel/service.py",
+            "crates/jankurai-fleet/service.py",
+            "packages/ux-qa/service.py",
         ] {
             let mut ctx = context(inventory(path, "import psycopg\nvalue = eval(input())\n"));
             ctx.self_audit = self_audit;
@@ -356,12 +360,20 @@ fn non_product_python_uses_declared_boundary_not_global_directory_exemptions() {
         ("scripts/notes.py", "import subprocess\n"),
         ("scripts_service/main.py", "import psycopg\n"),
         ("db/reconcile.py", "import psycopg\n"),
+        ("crates/jankurai-fleet/service.py", "import psycopg\n"),
+        ("packages/ux-qa/service.py", "import psycopg\n"),
     ]);
     for self_audit in [false, true] {
         f.ctx.self_audit = self_audit;
         let hits = helpers::bad_python_path_hits(&f.ctx);
-        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.len(), 4, "self={self_audit}");
         assert!(hits.iter().any(|hit| hit.rel_path == "db/reconcile.py"));
+        assert!(hits
+            .iter()
+            .any(|hit| hit.rel_path == "crates/jankurai-fleet/service.py"));
+        assert!(hits
+            .iter()
+            .any(|hit| hit.rel_path == "packages/ux-qa/service.py"));
         assert!(hits
             .iter()
             .any(|hit| hit.rel_path == "scripts_service/main.py"));
