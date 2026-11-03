@@ -16,6 +16,18 @@ const HLT_RULE_ID: &str = "HLT-029-RUST-BAD-BEHAVIOR";
 static STATIC_MUT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?:^|[^'\w])static\s+mut\b").expect("static-mut regex"));
 
+/// Matches a *call* to an unbounded channel constructor, `unbounded_channel(...)` (tokio,
+/// futures) or `unbounded(...)` (crossbeam, flume, async-channel), including the turbofish
+/// form `unbounded_channel::<T>()`. A plain substring `contains("unbounded(")` also matched
+/// any identifier ending in `unbounded`, e.g. `fn record_unbounded(`, which flagged a
+/// function that creates no channel (jeryu-core#83, 2026-11-03), and it missed the turbofish
+/// form entirely. The leading `[^\w]` requires the name to start a word, so `foo_unbounded(`
+/// and `unboundedly(` are not calls to the constructor.
+static UNBOUNDED_CHANNEL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?:^|[^\w])unbounded(?:_channel)?\s*(?:::\s*<[^()]*>)?\s*\(")
+        .expect("unbounded-channel regex")
+});
+
 const HARD_RULES: &[LanguageRule] = &[
     LanguageRule {
         id: "rust.unsafe.undocumented-block",
@@ -703,7 +715,7 @@ fn hard_hit_for_line(
             "NearbyAsyncContext",
         ));
     }
-    if lower.contains("unbounded_channel(") || lower.contains("unbounded(") {
+    if UNBOUNDED_CHANNEL_RE.is_match(&lower) {
         return Some(finding(
             "rust.async.unbounded-channel",
             "unbounded_channel",
@@ -948,7 +960,45 @@ fn finding(
 
 #[cfg(test)]
 mod tests {
-    use super::STATIC_MUT_RE;
+    use super::{STATIC_MUT_RE, UNBOUNDED_CHANNEL_RE};
+
+    fn flags_unbounded(line: &str) -> bool {
+        UNBOUNDED_CHANNEL_RE.is_match(&line.to_ascii_lowercase())
+    }
+
+    #[test]
+    fn unbounded_channel_constructors_are_flagged() {
+        assert!(flags_unbounded("let (tx, rx) = mpsc::unbounded_channel();"));
+        assert!(flags_unbounded(
+            "let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();"
+        ));
+        assert!(flags_unbounded(
+            "let (s, r) = crossbeam_channel::unbounded();"
+        ));
+        assert!(flags_unbounded("let (s, r) = unbounded::<Event>();"));
+        assert!(flags_unbounded("    let (tx, rx) = flume::unbounded ();"));
+        assert!(flags_unbounded(
+            "let (tx, rx) = futures::channel::mpsc::unbounded();"
+        ));
+    }
+
+    #[test]
+    fn identifiers_ending_in_unbounded_are_not_flagged() {
+        // The jeryu-core#83 false positive: a function *named* `record_unbounded` creates no
+        // channel, yet the substring `unbounded(` capped the repository's score at 72.
+        assert!(!flags_unbounded("pub(crate) fn record_unbounded("));
+        assert!(!flags_unbounded(
+            "let admission = crate::pack_rpc::record_unbounded("
+        ));
+        assert!(!flags_unbounded(
+            "fn receive_pack_prefix_rejects_unbounded_command_section() {"
+        ));
+        assert!(!flags_unbounded("let x = is_unbounded(range);"));
+        assert!(!flags_unbounded(
+            "// an unboundedly growing queue (see below)"
+        ));
+        assert!(!flags_unbounded("let unbounded_limit = 10;"));
+    }
 
     // Inputs are pre-lowercased, mirroring `hard_hit_for_line`'s `line.to_ascii_lowercase()`.
     fn flags(line: &str) -> bool {
